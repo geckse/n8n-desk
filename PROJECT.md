@@ -442,7 +442,13 @@ The companion docs each deep-dive into one aspect of this spec. Here's how they 
 
 3. **Dual API surface** — n8n-desk talks to n8n via two channels: MCP (workflow CRUD/execution) and Chat-Hub REST+WebSocket (conversations/streaming). These need unified error handling, auth token management, and connection state.
 
-4. **Agent architecture** — The local agent for Cowork and Workflow modes is defined in `CLAUDE.md` under "Local Agent — Deep Agents SDK". Both modes use `deepagents` with different tool sets — Cowork gets workflow execution + local files, Workflow gets full MCP CRUD.
+4. **CORS constraint** — n8n only sets CORS headers on OAuth discovery endpoints (`/.well-known/*`). All other REST endpoints (ChatHub, `/rest/*`, `/healthz`) block cross-origin requests. In Electron, all n8n REST calls from the renderer must go through an `api:fetch` IPC proxy in the main process (Node.js fetch has no CORS restrictions). WebSocket connections are not affected.
+
+5. **Dual auth domains** — n8n has two completely separate auth middlewares: MCP OAuth tokens (`aud: "mcp-server-api"`, validated by `McpServerMiddlewareService`) only work for `/mcp-server/http/*`, while the REST API (`/rest/*`, `/chat/*`) only accepts `n8n-auth` session cookies (validated by `AuthService`) or `X-N8N-API-KEY` headers. No single token works for both. n8n-desk uses dual auth: MCP OAuth (browser-based PKCE) for MCP tool access + credential login (email+password POST to `/rest/login`) for REST API + user profile. The REST API prefix is `/rest/` (configurable via `N8N_ENDPOINT_REST`, defaults to `rest`), NOT `/api/v1/`.
+
+6. **n8n REST API endpoint prefix** — n8n's internal REST API uses the `/rest/` prefix by default (e.g., `/rest/login`, `/rest/workflows`). This is separate from the public API (`/api/v1/`). The `@RestController()` decorator routes to `/{endpoints.rest}/{basePath}` where `endpoints.rest` defaults to `"rest"`. The public API at `/api/v1/` is a separate OpenAPI-based layer that uses `X-N8N-API-KEY` header auth.
+
+7. **Agent architecture** — The local agent for Cowork and Workflow modes is defined in `CLAUDE.md` under "Local Agent — Deep Agents SDK". Both modes use `deepagents` with different tool sets — Cowork gets workflow execution + local files, Workflow gets full MCP CRUD.
 
 ---
 

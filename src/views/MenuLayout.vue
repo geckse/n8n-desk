@@ -1,24 +1,33 @@
 <script setup lang="ts">
 import {
   IonHeader, IonToolbar,
-  IonIcon, IonItem, IonLabel,
+  IonItem, IonLabel,
   IonPage, IonRouterOutlet, IonButtons, IonAvatar,
   IonSegment, IonSegmentButton,
 } from '@ionic/vue'
-import { person, settingsOutline } from 'ionicons/icons'
+import { User, Settings } from 'lucide-vue-next'
 import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { usePlatform } from '@/composables/usePlatform'
 import { useSidebarResize } from '@/composables/useSidebarResize'
+import { useConnection } from '@/composables/useConnection'
+import { useInstancesStore } from '@/stores/instances'
+import { useAuthStore } from '@/stores/auth'
 import ChatSidebar from '@/components/sidebar/ChatSidebar.vue'
 import CoworkSidebar from '@/components/sidebar/CoworkSidebar.vue'
 import WorkflowSidebar from '@/components/sidebar/WorkflowSidebar.vue'
+import InstanceSwitcher from '@/components/instance/InstanceSwitcher.vue'
+import AppSettings from '@/components/settings/AppSettings.vue'
+import ReLoginModal from '@/components/auth/ReLoginModal.vue'
 
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
 const { isMobile } = usePlatform()
+const instancesStore = useInstancesStore()
+const authStore = useAuthStore()
+const { status: connectionStatus, startMonitoring } = useConnection()
 
 const {
   sidebarWidth,
@@ -29,8 +38,36 @@ const {
 } = useSidebarResize()
 
 const mobileMenuOpen = ref(false)
+const switcherOpen = ref(false)
+const settingsOpen = ref(false)
 
 const activeMode = ref(deriveMode())
+
+// Start connection monitoring for the active instance
+if (instancesStore.activeInstance) {
+  startMonitoring(instancesStore.activeInstance.url)
+}
+
+// Computed: should we show Cowork/Workflow tabs?
+const showAdvancedModes = computed(() => !isMobile.value && authStore.isFullAccess)
+
+// Display info from stores
+const displayName = computed(() => {
+  const profile = authStore.userProfile
+  if (profile?.firstName || profile?.lastName) {
+    return [profile.firstName, profile.lastName].filter(Boolean).join(' ')
+  }
+  // Fallback to role name
+  const role = authStore.userRole
+  if (role === 'chatUser') return 'Chat User'
+  if (role === 'member') return 'Member'
+  if (role === 'admin') return 'Admin'
+  if (role === 'owner') return 'Owner'
+  return ''
+})
+
+const instanceLabel = computed(() => instancesStore.activeInstance?.label ?? '')
+const instanceColor = computed(() => instancesStore.activeInstance?.color ?? '#ff6d5a')
 
 function deriveMode(): string {
   const path = route.path
@@ -45,8 +82,8 @@ function onModeChange(event: CustomEvent) {
   router.push(`/${mode}`)
 }
 
-function navigateSettings() {
-  router.push('/settings')
+function openSettings() {
+  settingsOpen.value = true
   mobileMenuOpen.value = false
 }
 
@@ -100,20 +137,42 @@ const sidebarStyle = computed(() => ({
             </ion-item>
           </div>
 
-          <!-- User / Settings Footer -->
+          <!-- User / Instance Footer -->
           <div class="sidebar-footer">
-            <ion-item button lines="none" class="user-item" @click="navigateSettings">
+            <ion-item
+              id="instance-switcher-trigger"
+              button
+              lines="none"
+              class="user-item"
+              @click="switcherOpen = true"
+            >
               <ion-avatar slot="start" class="user-avatar">
-                <div class="avatar-placeholder">
-                  <ion-icon :icon="person" />
+                <div class="avatar-placeholder" :style="{ background: instanceColor }">
+                  <User :size="16" />
                 </div>
               </ion-avatar>
               <ion-label>
-                <h3>Marcel</h3>
-                <p>n8n Cloud</p>
+                <h3>{{ displayName || 'User' }}</h3>
+                <p>{{ instanceLabel || 'Not connected' }}</p>
               </ion-label>
-              <ion-icon :icon="settingsOutline" slot="end" class="settings-icon" />
+              <div slot="end" class="footer-actions">
+                <div
+                  class="connection-dot"
+                  :class="{
+                    'connection-dot--connected': connectionStatus === 'connected',
+                    'connection-dot--reconnecting': connectionStatus === 'reconnecting',
+                    'connection-dot--disconnected': connectionStatus === 'disconnected',
+                  }"
+                />
+                <Settings :size="18" class="settings-icon" @click.stop="openSettings" />
+              </div>
             </ion-item>
+
+            <!-- Instance Switcher Popover -->
+            <InstanceSwitcher
+              v-model:is-open="switcherOpen"
+              trigger="instance-switcher-trigger"
+            />
           </div>
         </div>
       </div>
@@ -146,18 +205,40 @@ const sidebarStyle = computed(() => ({
               <ion-segment-button value="chat">
                 <ion-label>{{ t('modes.chat') }}</ion-label>
               </ion-segment-button>
-              <ion-segment-button v-if="!isMobile" value="cowork">
+              <ion-segment-button v-if="showAdvancedModes" value="cowork">
                 <ion-label>{{ t('modes.cowork') }}</ion-label>
               </ion-segment-button>
-              <ion-segment-button v-if="!isMobile" value="workflow">
+              <ion-segment-button v-if="showAdvancedModes" value="workflow">
                 <ion-label>{{ t('modes.workflow') }}</ion-label>
               </ion-segment-button>
             </ion-segment>
           </div>
         </ion-toolbar>
       </ion-header>
+
+      <!-- Connection banner -->
+      <div
+        v-if="connectionStatus === 'reconnecting' || connectionStatus === 'disconnected'"
+        class="connection-banner"
+        :class="{ 'connection-banner--disconnected': connectionStatus === 'disconnected' }"
+      >
+        {{ connectionStatus === 'reconnecting'
+          ? t('connection.reconnecting', { label: instanceLabel })
+          : t('connection.disconnected')
+        }}
+      </div>
+
       <ion-router-outlet />
     </ion-page>
+
+    <!-- Settings Modal -->
+    <AppSettings v-model:is-open="settingsOpen" />
+
+    <!-- Re-Login Modal (session expired) -->
+    <ReLoginModal
+      :is-open="authStore.sessionExpired"
+      @update:is-open="(v: boolean) => { if (!v) authStore.clearSessionExpired() }"
+    />
   </div>
 </template>
 
@@ -251,15 +332,64 @@ const sidebarStyle = computed(() => ({
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--color--primary);
   color: var(--color--neutral-white);
   border-radius: 50%;
   font-size: 16px;
 }
 
+.footer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing--xs);
+}
+
 .settings-icon {
   color: var(--color--text--tint-1);
-  font-size: 18px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--color--text);
+  }
+}
+
+// --- Connection Dot ---
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+
+  &--connected {
+    background: var(--color--success);
+  }
+
+  &--reconnecting {
+    background: var(--color--warning);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  &--disconnected {
+    background: var(--color--danger);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+// --- Connection Banner ---
+.connection-banner {
+  background: var(--color--warning--tint-1, #fef3cd);
+  color: var(--color--warning--shade-1, #856404);
+  padding: var(--spacing--3xs) var(--spacing--sm);
+  font-size: var(--font-size--2xs);
+  text-align: center;
+
+  &--disconnected {
+    background: var(--color--danger--tint-1, #f8d7da);
+    color: var(--color--danger--shade-1, #721c24);
+  }
 }
 
 // --- Resize Handle ---

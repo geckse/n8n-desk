@@ -18,10 +18,16 @@ interface N8nDeskBridge {
     write: (path: string, data: string) => Promise<void>
     append: (path: string, line: string) => Promise<void>
   }
+  api: {
+    fetch: (url: string, options?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }) =>
+      Promise<{ status: number; headers: Record<string, string>; body: string }>
+  }
   auth: {
-    login: (instanceUrl: string) => Promise<unknown>
-    logout: () => Promise<void>
-    refresh: () => Promise<unknown>
+    login: (instanceUrl: string, options?: { forceLocalhost?: boolean }) => Promise<import('./src/types/auth').AuthLoginResult>
+    logout: (instanceId: string) => Promise<void>
+    refresh: (instanceId: string) => Promise<import('./src/types/auth').AuthRefreshResult>
+    credentialLogin: (instanceId: string, credentials: { email: string; password: string; mfaCode?: string }) => Promise<import('./src/types/auth').CredentialLoginResult>
+    getSessionToken: (instanceId: string) => Promise<string | null>
   }
   keychain: {
     get: (key: string) => Promise<string | null>

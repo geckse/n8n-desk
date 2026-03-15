@@ -29,7 +29,7 @@ n8n already ships an **RFC 8414 compliant OAuth2 Authorization Server**, built f
 - **Token types:** Access token + Refresh token with expiration
 - **User consent:** Tracked per client/scope combination
 - **Rate limiting:** Applied to all OAuth endpoints (IP-based)
-- **CORS:** Enabled for discovery endpoints
+- **CORS:** Enabled for OAuth discovery endpoints **only** (`/.well-known/*`). All other n8n REST endpoints (ChatHub, `/api/v1/*`, `/healthz`) do **not** set CORS headers — n8n-desk must proxy these calls through Electron's main process via `api:fetch` IPC to avoid browser CORS blocks
 
 ### Key Source Files
 
@@ -58,11 +58,24 @@ Located in `packages/cli/src/modules/mcp/database/entities/`:
 
 | Method | Details |
 |---|---|
-| **Session cookies** | `n8n-auth` cookie, JWT-based, HttpOnly, MFA support |
-| **API keys** | `X-N8N-API-KEY` header, JWT-based with expiration |
+| **Session cookies** | `n8n-auth` cookie, JWT-based (HS256), HttpOnly, MFA support. Login at `POST /rest/login`. |
+| **API keys** | `X-N8N-API-KEY` header, JWT-based with expiration. For the public API (`/api/v1/`). |
 | **OIDC SSO** | Enterprise, endpoints at `/sso/oidc/*` |
 | **SAML SSO** | Enterprise, endpoints at `/sso/saml/*` |
-| **LDAP** | Enterprise, alternative auth backend |
+| **LDAP** | Enterprise, alternative auth backend (uses same `POST /rest/login` with LDAP username) |
+
+### n8n REST API Endpoint Prefix
+
+n8n's internal REST API uses `/rest/` as its default prefix (configurable via `N8N_ENDPOINT_REST` env var). The `@RestController()` decorator routes controllers to `/{endpoints.rest}/{basePath}`.
+
+| Endpoint | Prefix | Auth method |
+|---|---|---|
+| Internal REST API | `/rest/*` (e.g., `/rest/login`, `/rest/workflows`) | `n8n-auth` cookie |
+| Public API | `/api/v1/*` (e.g., `/api/v1/workflows`) | `X-N8N-API-KEY` header |
+| MCP server | `/mcp-server/http/*` | `Authorization: Bearer` (MCP OAuth or MCP API key) |
+| Chat-Hub | `/chat/*` (e.g., `/chat/agents`, `/chat/conversations`) | `n8n-auth` cookie |
+| OAuth | `/mcp-oauth/*`, `/.well-known/*` | None (public) |
+| Health | `/healthz` | None (public) |
 
 ---
 
@@ -126,25 +139,51 @@ n8n-desk supports **two access tiers** based on the authenticated user's role.
 | **Chat-only** | `global:chatUser` or `project:chatUser` | Talk to Workflow Agents, manage conversations, manage chat agents |
 | **Full automation** | `global:member` or higher | Everything in chat-only + search/create/execute/manage workflows via MCP |
 
-### Auth Flow (Full Automation — member/admin/owner)
+### Dual Auth: MCP OAuth + Credential Login
 
+n8n has **two separate auth domains** — MCP OAuth tokens (`aud: "mcp-server-api"`) cannot access the REST API (`/api/v1/*`), and REST API session cookies cannot access the MCP server. n8n-desk uses **both** to get full access:
+
+**Step 1 — MCP OAuth (automated, browser-based):**
 ```
-n8n-desk app  ──OAuth2 authorize──▶  n8n instance login page
+n8n-desk app  ──OAuth2 authorize──▶  n8n instance login page (browser)
      ◀──────── auth code callback ──────
      ──────── exchange for tokens ──▶  /mcp-oauth/token
      ◀──────── access_token + refresh_token ──────
      ──────── MCP calls with bearer token ──▶  n8n MCP server
 ```
 
-### Auth Flow (Chat-only — chatUser)
+**Step 2 — Credential login (email+password, in-app):**
+```
+n8n-desk app  ──POST email+password──▶  /rest/login
+     ◀──────── set-cookie: n8n-auth=<JWT> + user profile ──────
+     ──────── REST calls with Cookie header ──▶  n8n REST API (/rest/*)
+```
 
-```
-n8n-desk app  ──OAuth2 authorize──▶  n8n instance login page
-     ◀──────── auth code callback ──────
-     ──────── exchange for tokens ──▶  /mcp-oauth/token (chat scopes only)
-     ◀──────── access_token + refresh_token ──────
-     ──────── REST calls with bearer token ──▶  n8n ChatHub API
-```
+**Why two auth flows:**
+- MCP OAuth tokens are scoped ONLY to `/mcp-server/http` — they have `aud: "mcp-server-api"` and `meta: { isOAuth: true }`, validated by `McpServerMiddlewareService`
+- REST API only accepts `n8n-auth` cookie (HttpOnly JWT, validated by `AuthService`) or `X-N8N-API-KEY` header
+- These are completely separate middleware chains — no single token works for both
+
+**What each token provides:**
+| Token | Stored as | Used for | Refresh mechanism |
+|---|---|---|---|
+| MCP OAuth access token | `tokens.enc` (encrypted) | MCP tool calls (`/mcp-server/http/*`) | Refresh token grant (30-day refresh token) |
+| REST API session cookie | `session.enc` (encrypted) | REST API (`/rest/*`, `/chat/*`) | Auto-refreshed by n8n in `set-cookie` response headers |
+
+**MFA handling:** If the user has MFA enabled, the credential login step shows a TOTP input field. The `mfaCode` is sent in the POST body alongside email+password. n8n returns error code `998` when MFA is required but no code was provided.
+
+**n8n login endpoint details:**
+- **URL:** `POST /rest/login` (NOT `/api/v1/auth/login`)
+- **Body:** `{ emailOrLdapLoginId, password, mfaCode? }`
+- **Success (200):** Returns `{ data: { firstName, lastName, email, ... } }` + sets `n8n-auth` cookie
+- **Error (401):** Returns `{ message, code }` — code `998` = MFA required, other = invalid credentials
+- **Error (400):** Invalid email format
+
+**REST API prefix:** n8n's internal REST API uses `/rest/` prefix (configurable via `N8N_ENDPOINT_REST` env var, defaults to `"rest"`). The `@RestController()` decorator routes to `/{endpoints.rest}/{basePath}`. This is separate from the public API (`/api/v1/`) which uses `X-N8N-API-KEY` auth.
+
+**Session cookie refresh:** The `api:fetch` IPC proxy in Electron's main process intercepts `set-cookie` headers from n8n responses. When n8n auto-refreshes the JWT (at ~75% of expiry), the proxy transparently updates `session.enc` so the session stays alive without user interaction.
+
+### Auth Flow (Chat-only — chatUser)
 
 chatUser cannot use MCP OAuth (`mcp:oauth` scope missing), so n8n-desk must either:
 1. Use a **separate OAuth flow** that grants ChatHub REST API access, or
@@ -267,12 +306,20 @@ Full workflow lifecycle coverage: search, build, validate, create, execute, insp
 
 ## Summary
 
-n8n **is** the auth server. No custom auth infrastructure needed. The existing MCP OAuth2 server handles authorization code + PKCE, dynamic client registration, and token lifecycle.
+n8n **is** the auth server. n8n-desk uses **dual auth** to bridge the two separate auth domains:
 
-**Gaps to close:**
-1. Extend MCP OAuth scopes from 2 → 13 for full MCP tool coverage
-2. Add ChatHub scopes (`chatHub:message`, `chatHubAgent:*`) to the OAuth server so chatUsers can authenticate
-3. n8n-desk must be **role-aware** — detecting whether the user is a chatUser or member+ and adapting the UI accordingly
-4. chatUsers use the **ChatHub REST API** directly; members+ use **MCP tools** via bearer token
+1. **MCP OAuth** (browser-based PKCE) → MCP tool access via Bearer token
+2. **Credential login** (email+password to `/rest/login`) → REST API access via `n8n-auth` cookie + user profile
 
-This two-tier model means n8n-desk works for everyone: power users who manage workflows AND team members who just need to chat with Workflow Agents.
+**Implemented:**
+- MCP OAuth2 PKCE flow with dynamic client registration
+- Credential login with MFA support (TOTP code `998` detection)
+- Secure token storage (`tokens.enc` for OAuth, `session.enc` for session) via Electron `safeStorage`
+- Dual auth in `N8nApiClient` — auto-selects Cookie vs Bearer per endpoint path
+- Session cookie auto-refresh via `api:fetch` IPC proxy intercepting `set-cookie` headers
+- 4-step onboarding: URL → OAuth → Credentials → Connected
+
+**Remaining gaps:**
+1. Extend MCP OAuth scopes from 2 → 13 for full MCP tool coverage (n8n side)
+2. Add ChatHub scopes (`chatHub:message`, `chatHubAgent:*`) to the OAuth server so chatUsers can authenticate (n8n side)
+3. chatUser auth path — chatUsers can't use MCP OAuth, need credential login only or a parallel OAuth flow

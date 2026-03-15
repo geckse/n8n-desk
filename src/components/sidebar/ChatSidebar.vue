@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import {
-  IonButton, IonIcon, IonSearchbar,
+  IonButton, IonSearchbar,
   IonList, IonItem, IonLabel, IonListHeader, IonAvatar,
 } from '@ionic/vue'
-import { add, peopleOutline } from 'ionicons/icons'
+import { Plus, Bot } from 'lucide-vue-next'
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SessionList from './SessionList.vue'
@@ -38,11 +38,11 @@ function selectSession(sessionId: string) {
     <!-- Action Buttons -->
     <div class="sidebar-section sidebar-actions">
       <ion-button expand="block" class="action-btn action-btn--primary" @click="newChat">
-        <ion-icon slot="start" :icon="add" />
+        <Plus :size="18" slot="start" />
         {{ t('sidebar.newChat') }}
       </ion-button>
       <ion-button expand="block" fill="outline" class="action-btn action-btn--secondary" @click="openAgentsBrowser">
-        <ion-icon slot="start" :icon="peopleOutline" />
+        <Bot :size="18" slot="start" />
         {{ t('sidebar.agents') }}
       </ion-button>
     </div>

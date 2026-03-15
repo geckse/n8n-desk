@@ -17,7 +17,8 @@
     "chats": "Chats",
     "tasks": "Tasks",
     "workflows": "Workflows",
-    "componentShowcase": "Component Showcase"
+    "componentShowcase": "Component Showcase",
+    "addInstance": "Add instance"
   },
   "settings": {
     "title": "Settings",
@@ -25,10 +26,78 @@
     "themeSystem": "System",
     "themeLight": "Light",
     "themeDark": "Dark",
-    "language": "Language"
+    "language": "Language",
+    "sections": {
+      "preferences": "Preferences",
+      "general": "General",
+      "instances": "Instances",
+      "dangerZone": "Danger Zone"
+    },
+    "generalDescription": "Manage your app preferences and display settings.",
+    "instanceDescription": "Manage connection settings for this n8n instance.",
+    "instanceInfo": "Instance Information",
+    "instanceName": "Instance Name",
+    "instanceUrl": "Instance URL",
+    "instanceColor": "Color",
+    "disconnectInstance": "Disconnect Instance",
+    "disconnectDescription": "This will revoke your access tokens and remove this instance from n8n-desk. You can reconnect at any time."
+  },
+  "settingsModal": {
+    "cancel": "Cancel",
+    "save": "Save"
   },
   "onboarding": {
-    "connectToN8n": "Connect to n8n"
+    "connectToN8n": "Connect to n8n",
+    "stepConnect": "Connect",
+    "stepSignIn": "Sign In",
+    "stepCredentials": "Full Access",
+    "stepDone": "Connected",
+    "stepConnectTitle": "Connect to your n8n instance",
+    "stepSignInTitle": "Sign in with n8n",
+    "urlLabel": "n8n Instance URL",
+    "urlPlaceholder": "https://n8n.company.com",
+    "urlHelp": "Enter the URL of your n8n instance to get started.",
+    "connectButton": "Connect",
+    "signingIn": "Signing in to {hostname}...",
+    "signInHint": "A browser window will open for you to sign in.",
+    "havingTrouble": "Having trouble?",
+    "tryBrowserVerification": "Click here for browser verification",
+    "tryAgain": "Try again",
+    "changeUrl": "Change URL",
+    "stepCredentialsTitle": "Enable full API access",
+    "credentialsHelp": "Sign in with your n8n credentials to complete setup. Your credentials are sent directly to your n8n instance — never stored.",
+    "emailLabel": "Email",
+    "emailPlaceholder": "you{'@'}company.com",
+    "passwordLabel": "Password",
+    "mfaLabel": "Authentication code",
+    "mfaPlaceholder": "6-digit code",
+    "signInButton": "Sign in",
+    "connected": "You're connected!",
+    "instanceLabel": "Instance name",
+    "instanceColor": "Color",
+    "discoveringAgents": "Discovering agents...",
+    "foundAgents": "Found {count} agent | Found {count} agents",
+    "getStarted": "Get started",
+    "errors": {
+      "invalidUrl": "Enter a valid URL (e.g., https://n8n.company.com)",
+      "unreachable": "Can't reach this URL. Check the address and try again.",
+      "notN8n": "This doesn't appear to be an n8n instance.",
+      "authFailed": "Authentication failed. Please try again.",
+      "authCancelled": "Authentication was cancelled.",
+      "authTimeout": "Authentication timed out. Please try again.",
+      "credentialsFailed": "Sign-in failed. Check your credentials and try again."
+    }
+  },
+  "reLogin": {
+    "title": "Session expired",
+    "description": "Your session with {instance} has expired. Sign in again to continue.",
+    "signInButton": "Sign in",
+    "signingIn": "Signing in...",
+    "error": "Sign-in failed. Check your credentials and try again."
+  },
+  "connection": {
+    "reconnecting": "Reconnecting to {label}...",
+    "disconnected": "Disconnected"
   },
   "views": {
     "chatComingSoon": "Chat mode — coming soon",

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonBackButton, IonButtons,
-  IonButton, IonIcon, IonLabel, IonItem, IonList, IonListHeader, IonInput,
+  IonButton, IonLabel, IonItem, IonList, IonListHeader, IonInput,
   IonTextarea, IonToggle, IonCheckbox, IonRadio, IonRadioGroup, IonSelect,
   IonSelectOption, IonRange, IonSegment, IonSegmentButton, IonCard, IonCardHeader,
   IonCardTitle, IonCardSubtitle, IonCardContent, IonChip, IonBadge, IonAvatar,
@@ -12,10 +12,10 @@ import {
   alertController, toastController, actionSheetController,
 } from '@ionic/vue'
 import {
-  heart, star, trash, share, add, checkmark, close, person,
-  ellipsisHorizontal, chevronForward, notifications, mail,
-  chatbubbles, settings, construct, gitNetwork, warning, informationCircle,
-} from 'ionicons/icons'
+  Heart, Star, Trash2, Share2, Plus, Check, X, User,
+  MoreHorizontal, ChevronRight, Bell, Mail,
+  MessageSquare, Settings, Wrench, GitBranch, AlertTriangle, Info,
+} from 'lucide-vue-next'
 import { ref } from 'vue'
 
 const segmentValue = ref('first')
@@ -47,9 +47,9 @@ async function showActionSheet() {
   const actionSheet = await actionSheetController.create({
     header: 'Actions',
     buttons: [
-      { text: 'Delete', role: 'destructive', icon: trash },
-      { text: 'Share', icon: share },
-      { text: 'Favorite', icon: heart },
+      { text: 'Delete', role: 'destructive' },
+      { text: 'Share' },
+      { text: 'Favorite' },
       { text: 'Cancel', role: 'cancel' },
     ],
   })
@@ -93,15 +93,15 @@ async function showActionSheet() {
       </div>
       <div class="showcase-section">
         <ion-button>
-          <ion-icon slot="start" :icon="heart" />
+          <Heart :size="18" slot="start" />
           With Icon
         </ion-button>
         <ion-button fill="outline">
-          <ion-icon slot="end" :icon="chevronForward" />
+          <ChevronRight :size="18" slot="end" />
           Icon End
         </ion-button>
         <ion-button>
-          <ion-icon slot="icon-only" :icon="star" />
+          <Star :size="18" slot="icon-only" />
         </ion-button>
       </div>
 
@@ -141,18 +141,18 @@ async function showActionSheet() {
           <ion-label>Default</ion-label>
         </ion-chip>
         <ion-chip color="primary">
-          <ion-icon :icon="person" />
+          <User :size="16" />
           <ion-label>Primary</ion-label>
         </ion-chip>
         <ion-chip color="success">
-          <ion-icon :icon="checkmark" />
+          <Check :size="16" />
           <ion-label>Success</ion-label>
         </ion-chip>
         <ion-chip color="warning">
           <ion-label>Warning</ion-label>
         </ion-chip>
         <ion-chip color="danger">
-          <ion-icon :icon="close" />
+          <X :size="16" />
           <ion-label>Danger</ion-label>
         </ion-chip>
         <ion-chip outline>
@@ -173,11 +173,11 @@ async function showActionSheet() {
       </ion-list-header>
       <ion-list inset>
         <ion-item>
-          <ion-icon :icon="person" slot="start" />
+          <User :size="20" slot="start" />
           <ion-label>Simple Item</ion-label>
         </ion-item>
         <ion-item>
-          <ion-icon :icon="mail" slot="start" />
+          <Mail :size="20" slot="start" />
           <ion-label>
             <h2>Two-Line Item</h2>
             <p>Secondary text goes here</p>
@@ -195,7 +195,7 @@ async function showActionSheet() {
           <ion-note slot="end">3:42 PM</ion-note>
         </ion-item>
         <ion-item detail>
-          <ion-icon :icon="notifications" slot="start" />
+          <Bell :size="20" slot="start" />
           <ion-label>Detail Arrow</ion-label>
         </ion-item>
       </ion-list>
@@ -214,10 +214,10 @@ async function showActionSheet() {
           </ion-item>
           <ion-item-options side="end">
             <ion-item-option color="danger">
-              <ion-icon slot="icon-only" :icon="trash" />
+              <Trash2 :size="20" slot="icon-only" />
             </ion-item-option>
             <ion-item-option color="primary">
-              <ion-icon slot="icon-only" :icon="share" />
+              <Share2 :size="20" slot="icon-only" />
             </ion-item-option>
           </ion-item-options>
         </ion-item-sliding>
@@ -412,7 +412,7 @@ async function showActionSheet() {
       <!-- FAB -->
       <ion-fab slot="fixed" vertical="bottom" horizontal="end">
         <ion-fab-button>
-          <ion-icon :icon="add" />
+          <Plus :size="24" />
         </ion-fab-button>
       </ion-fab>
 

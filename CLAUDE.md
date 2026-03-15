@@ -100,6 +100,7 @@ n8n-desk/
 │   ├── preload.ts                     # contextBridge — exposes IPC to renderer
 │   ├── ipc/                           # IPC handler registration
 │   │   ├── agent.ts                   # agent:invoke, agent:stop, agent:approve
+│   │   ├── api-proxy.ts              # api:fetch — CORS-free HTTP proxy for renderer
 │   │   ├── auth.ts                    # auth:login, auth:logout, auth:refresh
 │   │   ├── storage.ts                 # storage:read, storage:write, storage:append
 │   │   └── keychain.ts               # keychain:get, keychain:set, keychain:delete
@@ -161,10 +162,12 @@ export const useAuthStore = defineStore('auth', () => {
 Components call composables. Composables call services. Services make HTTP/WebSocket calls. Never put `fetch()` directly in a component.
 
 ```
-Component → Composable → Service → n8n API
+Component → Composable → Service → IPC api:fetch proxy → n8n API
                            ↕
                      local-storage.ts → ~/.n8n-desk/
 ```
+
+**Important:** Never use native `fetch()` for n8n API calls in the renderer — it will fail with CORS errors. Always use `N8nApiClient` (which routes through `api:fetch` IPC) or `window.n8nDesk.api.fetch()` directly.
 
 ---
 
@@ -188,6 +191,7 @@ n8n-desk communicates with n8n through two separate channels. Both share the sam
 ### Shared Concerns
 
 - **Base HTTP client** (`services/n8n-api.ts`): attach bearer token, handle 401 → refresh token, base URL from active instance config
+- **CORS proxy**: all REST calls from the renderer are proxied through `api:fetch` IPC — n8n does not set CORS headers on its API endpoints
 - **Instance-scoped**: all API clients are parameterized by instance — switching instances swaps the base URL and token
 - **Connection state**: track online/offline for both channels, surface in UI
 - **Error handling**: normalize errors from both APIs into a consistent format
@@ -214,6 +218,7 @@ Use one IPC channel per domain. Each channel has typed request/response shapes:
 | `storage:read` | renderer → main | Read from `~/.n8n-desk/` |
 | `storage:write` | renderer → main | Write to `~/.n8n-desk/` |
 | `storage:append` | renderer → main | Append to JSONL session file |
+| `api:fetch` | renderer → main | **HTTP proxy — all n8n API calls from renderer go through this** |
 | `keychain:get` | renderer → main | Read secret from OS keychain |
 | `keychain:set` | renderer → main | Store secret in OS keychain |
 
@@ -247,10 +252,18 @@ contextBridge.exposeInMainWorld('n8nDesk', {
 
 | Process | Responsibilities |
 |---|---|
-| **Main** | Deep Agents execution, OS keychain access, file I/O (`~/.n8n-desk/`), OAuth redirect handling, MCP tool calls (for agent) |
+| **Main** | Deep Agents execution, OS keychain access, file I/O (`~/.n8n-desk/`), OAuth redirect handling, MCP tool calls (for agent), **HTTP proxy for all n8n REST API calls** |
 | **Renderer** | Vue UI, Pinia stores (in-memory), Chat-Hub WebSocket (direct), theme, routing |
 
-Chat-Hub WebSocket lives in the **renderer** — it needs low-latency streaming directly into Vue reactivity. Auth-sensitive HTTP calls (token refresh, MCP) go through **main** to keep tokens out of the renderer.
+### CORS Constraint — All REST Calls Go Through Main
+
+**n8n does NOT set CORS headers on most API endpoints** (only on OAuth discovery). This means the renderer (`localhost:5173` in dev, `file://` in prod) **cannot directly `fetch()` any n8n REST endpoint** — the browser blocks it.
+
+**Solution:** All n8n HTTP calls from the renderer are proxied through the `api:fetch` IPC channel. The main process makes the actual `fetch()` (Node.js has no CORS restrictions), then returns `{ status, headers, body }` to the renderer.
+
+- `N8nApiClient` (`src/services/n8n-api.ts`) automatically uses `window.n8nDesk.api.fetch()` when running in Electron
+- `useConnection` composable uses the same proxy for health checks
+- The **only exception** is WebSocket connections — these go direct from the renderer (WebSocket is not subject to the same CORS preflight as fetch)
 
 ---
 

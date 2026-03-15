@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { IonButton, IonIcon, IonSearchbar } from '@ionic/vue'
-import { add } from 'ionicons/icons'
+import { IonButton, IonSearchbar } from '@ionic/vue'
+import { Plus } from 'lucide-vue-next'
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SessionList from './SessionList.vue'
@@ -24,7 +24,7 @@ function selectSession(sessionId: string) {
     <!-- New Task Button -->
     <div class="sidebar-section">
       <ion-button expand="block" class="action-btn" @click="newTask">
-        <ion-icon slot="start" :icon="add" />
+        <Plus :size="18" slot="start" />
         {{ t('sidebar.newTask') }}
       </ion-button>
     </div>
