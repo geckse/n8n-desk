@@ -7,29 +7,61 @@ import { Plus, Bot } from 'lucide-vue-next'
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SessionList from './SessionList.vue'
-import { mockChatSessions, mockAgents } from '@/mocks/sidebar'
+import { useChatStore } from '@/stores/chat'
+import { useChatHub } from '@/composables/useChatHub'
+import type { ChatModelDto } from '@/types/chathub'
 
 const { t } = useI18n()
+const chatStore = useChatStore()
+const chatHub = useChatHub()
 const searchQuery = ref('')
-const activeSessionId = ref<string | null>(null)
 
-const pinnedAgents = computed(() => mockAgents.filter((a) => a.pinned))
+const pinnedAgents = computed(() => chatHub.agents.value.slice(0, 5))
 
-function newChat() {
-  // TODO: create new chat session
+function getAgentInitial(agent: ChatModelDto): string {
+  if (agent.icon?.type === 'emoji') return agent.icon.value
+  return agent.name.charAt(0).toUpperCase()
+}
+
+function getAgentColor(agent: ChatModelDto): string {
+  // Deterministic color from agent name
+  let hash = 0
+  for (let i = 0; i < agent.name.length; i++) {
+    hash = agent.name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const hue = Math.abs(hash) % 360
+  return `hsl(${hue}, 55%, 50%)`
+}
+
+function getAgentKey(agent: ChatModelDto): string {
+  const m = agent.model
+  if ('agentId' in m) return m.agentId
+  if ('workflowId' in m) return m.workflowId
+  return `${m.provider}:${m.model}`
+}
+
+async function newChat() {
+  const sessionId = await chatStore.createSession('New chat')
+  chatStore.switchSession(sessionId)
 }
 
 function openAgentsBrowser() {
   // TODO: open agents browser modal/view
 }
 
-function selectAgent(agentId: string) {
-  // TODO: start chat with agent
-  console.log('Start chat with agent:', agentId)
+async function selectAgent(agent: ChatModelDto) {
+  const agentKey = getAgentKey(agent)
+  const sessionId = await chatStore.createSession(agent.name, agentKey, agent.name)
+  chatStore.switchSession(sessionId)
+  chatHub.selectAgent(agent.model)
 }
 
 function selectSession(sessionId: string) {
-  activeSessionId.value = sessionId
+  chatStore.switchSession(sessionId)
+}
+
+async function deleteSession(sessionId: string) {
+  await chatStore.deleteSession(sessionId)
 }
 </script>
 
@@ -55,14 +87,14 @@ function selectSession(sessionId: string) {
       <ion-list lines="none" class="pinned-list">
         <ion-item
           v-for="agent in pinnedAgents"
-          :key="agent.id"
+          :key="getAgentKey(agent)"
           button
           class="pinned-item"
-          @click="selectAgent(agent.id)"
+          @click="selectAgent(agent)"
         >
           <ion-avatar slot="start" class="agent-avatar">
-            <div class="agent-avatar-circle" :style="{ background: agent.avatarColor }">
-              {{ agent.avatarInitial }}
+            <div class="agent-avatar-circle" :style="{ background: getAgentColor(agent) }">
+              {{ getAgentInitial(agent) }}
             </div>
           </ion-avatar>
           <ion-label>{{ agent.name }}</ion-label>
@@ -81,8 +113,8 @@ function selectSession(sessionId: string) {
 
     <!-- Session List -->
     <SessionList
-      :sessions="mockChatSessions"
-      :active-session-id="activeSessionId"
+      :sessions="chatStore.sortedSessions"
+      :active-session-id="chatStore.activeSessionId"
       :search-query="searchQuery"
       :list-header="t('sidebar.chats')"
       @select="selectSession"
