@@ -95,6 +95,78 @@
     "signingIn": "Signing in...",
     "error": "Sign-in failed. Check your credentials and try again."
   },
+  "chat": {
+    "input": {
+      "placeholder": "Message {agent}...",
+      "placeholderDefault": "Send a message...",
+      "send": "Send",
+      "stop": "Stop generating"
+    },
+    "emptyState": {
+      "title": "Start a conversation",
+      "description": "Choose an agent and send a message to get started.",
+      "noAgents": "No agents available",
+      "noAgentsDescription": "Connect to an n8n instance with workflow agents to start chatting."
+    },
+    "messages": {
+      "thinking": "Thinking...",
+      "generating": "Generating...",
+      "copy": "Copy",
+      "copied": "Copied!",
+      "retry": "Retry",
+      "delete": "Delete",
+      "you": "You",
+      "toolCall": "Using {tool}",
+      "toolResult": "Result from {tool}",
+      "errorGeneric": "Something went wrong. Please try again.",
+      "errorNetwork": "Network error. Check your connection and try again.",
+      "errorTimeout": "Request timed out. Please try again.",
+      "errorRateLimit": "Too many requests. Please wait a moment."
+    },
+    "agents": {
+      "title": "Agents",
+      "search": "Search agents...",
+      "noAgentsFound": "No agents found",
+      "allAgents": "All Agents",
+      "recentAgents": "Recent",
+      "selectAgent": "Select an agent",
+      "agentInfo": "Agent Info",
+      "createdBy": "Created by {name}",
+      "model": "Model"
+    },
+    "artifacts": {
+      "title": "Artifacts",
+      "code": "Code",
+      "table": "Table",
+      "workflow": "Workflow",
+      "preview": "Preview",
+      "download": "Download",
+      "copyCode": "Copy code",
+      "openInN8n": "Open in n8n"
+    },
+    "sessions": {
+      "title": "Conversations",
+      "new": "New conversation",
+      "rename": "Rename",
+      "delete": "Delete",
+      "deleteConfirm": "Delete this conversation? It will be archived for 30 days.",
+      "deleteAll": "Delete all conversations",
+      "deleteAllConfirm": "Delete all conversations? They will be archived for 30 days.",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "previous7Days": "Previous 7 days",
+      "older": "Older",
+      "noSessions": "No conversations yet",
+      "untitled": "Untitled conversation"
+    },
+    "connection": {
+      "connected": "Connected",
+      "reconnecting": "Reconnecting...",
+      "disconnected": "Disconnected",
+      "offline": "You're offline. Reconnect to continue chatting.",
+      "sessionExpired": "Session expired. Sign in again."
+    }
+  },
   "connection": {
     "reconnecting": "Reconnecting to {label}...",
     "disconnected": "Disconnected"
