@@ -31,7 +31,24 @@
       "preferences": "Preferences",
       "general": "General",
       "instances": "Instances",
-      "dangerZone": "Danger Zone"
+      "dangerZone": "Danger Zone",
+      "aiAgent": "AI / Agent"
+    },
+    "ai": {
+      "description": "Configure the AI backend for Cowork and Workflow modes.",
+      "backend": "Agent Backend",
+      "backendClaudeSdk": "Claude SDK",
+      "backendDeepAgents": "Deep Agents",
+      "provider": "LLM Provider",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "sk-...",
+      "model": "Model",
+      "modelPlaceholder": "e.g. claude-sonnet-4-6",
+      "ollamaUrl": "Ollama Base URL",
+      "testConnection": "Test Connection",
+      "testSuccess": "Connection successful",
+      "testFailed": "Connection failed",
+      "testNotAvailable": "Test not available in browser mode"
     },
     "generalDescription": "Manage your app preferences and display settings.",
     "instanceDescription": "Manage connection settings for this n8n instance.",
@@ -98,6 +115,50 @@
   "connection": {
     "reconnecting": "Reconnecting to {label}...",
     "disconnected": "Disconnected"
+  },
+  "workflow": {
+    "tools": {
+      "searchNodes": "Search Nodes",
+      "getNodeTypes": "Get Node Types",
+      "getSuggestedNodes": "Get Suggested Nodes",
+      "validateWorkflow": "Validate Workflow",
+      "createWorkflow": "Create Workflow",
+      "updateWorkflow": "Update Workflow",
+      "searchWorkflows": "Search Workflows",
+      "getWorkflowDetails": "Get Workflow Details",
+      "executeWorkflow": "Execute Workflow",
+      "getExecution": "Get Execution",
+      "publishWorkflow": "Publish Workflow",
+      "unpublishWorkflow": "Unpublish Workflow",
+      "archiveWorkflow": "Archive Workflow"
+    },
+    "status": {
+      "running": "Running...",
+      "completed": "Completed",
+      "failed": "Failed",
+      "waitingApproval": "Waiting for approval"
+    },
+    "approval": {
+      "title": "Approval Required",
+      "approve": "Approve",
+      "reject": "Reject",
+      "executePrompt": "The agent wants to execute workflow \"{name}\".",
+      "createPrompt": "The agent wants to create a new workflow.",
+      "updatePrompt": "The agent wants to update workflow \"{name}\".",
+      "publishPrompt": "The agent wants to activate workflow \"{name}\".",
+      "archivePrompt": "The agent wants to archive workflow \"{name}\"."
+    },
+    "emptyState": {
+      "title": "Workflow Mode",
+      "description": "Describe what you want to automate and the AI agent will build n8n workflows for you.",
+      "noConfig": "Configure an AI backend in Settings to get started."
+    }
+  },
+  "errors": {
+    "agentNotAvailable": "Agent bridge not available",
+    "agentFailed": "Agent invocation failed",
+    "connectionLost": "Connection to n8n instance lost",
+    "toolCallFailed": "Tool call failed: {tool}"
   },
   "views": {
     "chatComingSoon": "Chat mode — coming soon",
