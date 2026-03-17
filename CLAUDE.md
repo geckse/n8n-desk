@@ -173,24 +173,28 @@ Component → Composable → Service → IPC api:fetch proxy → n8n API
 
 ## Two API Channels
 
-n8n-desk communicates with n8n through two separate channels. Both share the same OAuth2 bearer token.
+n8n-desk communicates with n8n through two separate channels with **different auth mechanisms** (n8n has separate auth domains — no single token works for both).
 
-### 1. Chat-Hub API (Chat mode)
+**Important: n8n-desk NEVER uses the public API (`/api/v1/*`).** That API requires `X-N8N-API-KEY` header auth which is a separate per-user API key. The `n8n-auth` session cookie does NOT work for `/api/v1/*`. Instead, n8n-desk uses the internal REST API (`/rest/*`) — the same API that n8n's own editor frontend uses.
 
-- **REST**: `POST /chat/conversations/send`, `GET /chat/conversations`, etc.
-- **WebSocket**: Push events for streaming (`ChatHubStreamChunk`, etc.)
-- Handles: conversations, agents, models, streaming responses
+### 1. Chat-Hub API + Internal REST API (Chat mode)
+
+- **Auth**: `n8n-auth` session cookie (from credential login at `POST /rest/login`)
+- **REST**: `/chat/*` endpoints (`POST /chat/conversations/send`, `GET /chat/conversations`, etc.)
+- **REST**: `/rest/*` endpoints (`/rest/workflows`, `/rest/me`, etc.) for user profile and data
+- **WebSocket**: `/rest/push` for streaming (`ChatHubStreamChunk`, etc.)
 - See `CHATHUB.md` for full endpoint list and types
 
 ### 2. MCP Tools (Cowork + Workflow modes)
 
+- **Auth**: MCP OAuth Bearer token (from PKCE flow)
 - 13 tools for workflow lifecycle: search, build, validate, create, execute, manage
-- Called via the n8n MCP server with bearer token auth
+- Called via the n8n MCP server at `/mcp-server/http/*`
 - See `AUTHFLOW_AND_MCPTOOLS.md` for full tool list and scope mapping
 
 ### Shared Concerns
 
-- **Base HTTP client** (`services/n8n-api.ts`): attach bearer token, handle 401 → refresh token, base URL from active instance config
+- **Base HTTP client** (`services/n8n-api.ts`): auto-selects Cookie auth (`/rest/*`, `/chat/*`) vs Bearer auth (`/mcp-server/*`), handles 401 → refresh/re-login, base URL from active instance config
 - **CORS proxy**: all REST calls from the renderer are proxied through `api:fetch` IPC — n8n does not set CORS headers on its API endpoints
 - **Instance-scoped**: all API clients are parameterized by instance — switching instances swaps the base URL and token
 - **Connection state**: track online/offline for both channels, surface in UI
@@ -943,3 +947,4 @@ npx cap open ios    # or android
 - **Don't store secrets in localStorage.** Use OS keychain (Electron `safeStorage`) or Capacitor secure storage.
 - **Don't import from `n8n-master/` at build time.** Copy what you need into `src/`. The reference dir is for reading, not linking.
 - **Don't use Options API or `defineComponent()`.** `<script setup lang="ts">` only.
+- **Don't use the public API (`/api/v1/*`).** It requires `X-N8N-API-KEY` header auth — session cookies don't work. Use `/rest/*` (internal REST API) for all non-MCP calls. This is the same API n8n's own editor uses.

@@ -103,7 +103,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   /**
    * Sign in with email+password to get REST API session access.
-   * This is separate from MCP OAuth — gives access to /api/v1/* endpoints.
+   * This is separate from MCP OAuth — gives access to /rest/* and /chat/* endpoints.
    */
   async function credentialLogin(instanceId: string, credentials: { email: string; password: string; mfaCode?: string }): Promise<CredentialLoginResult> {
     if (!window.n8nDesk) {

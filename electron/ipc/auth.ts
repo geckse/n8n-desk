@@ -303,7 +303,7 @@ export function registerAuthHandlers(): void {
         await storeTokens(instanceId, tokenResponse.access_token, tokenResponse.refresh_token)
 
         // 13. Write auth metadata (non-secret)
-        // Note: User profile is not available — MCP OAuth tokens cannot access /api/v1/me
+        // Note: User profile is not available — MCP OAuth tokens cannot access /rest/me
         const authMeta: AuthMetadata = {
           clientId: clientInfo.client_id,
           clientName: 'n8n-desk',
@@ -425,7 +425,7 @@ export function registerAuthHandlers(): void {
 
   // --- auth:credential-login ---
   // Signs in with email+password to get a REST API session cookie (n8n-auth JWT).
-  // This is separate from MCP OAuth — gives access to /api/v1/* endpoints.
+  // This is separate from MCP OAuth — gives access to /rest/* and /chat/* endpoints.
   ipcMain.handle(
     'auth:credential-login',
     async (

@@ -77,6 +77,18 @@ n8n's internal REST API uses `/rest/` as its default prefix (configurable via `N
 | OAuth | `/mcp-oauth/*`, `/.well-known/*` | None (public) |
 | Health | `/healthz` | None (public) |
 
+### Why n8n-desk Uses `/rest/*`, NOT `/api/v1/*`
+
+**The public API (`/api/v1/*`) is NOT usable by n8n-desk.** It requires a dedicated `X-N8N-API-KEY` header (a separate JWT generated per-user in n8n settings). The `n8n-auth` session cookie from credential login does NOT authenticate against `/api/v1/*` — these are completely separate auth middleware chains.
+
+n8n-desk uses the **internal REST API** (`/rest/*`) for all non-MCP interactions. The session cookie from `POST /rest/login` authenticates against:
+- `/rest/*` — full internal REST API (workflows, executions, users, settings, etc.)
+- `/chat/*` — Chat-Hub endpoints (conversations, agents, models, streaming)
+
+This is the same API surface that n8n's own editor frontend uses. It provides the same data as the public API but authenticates via session cookie instead of API key.
+
+**n8n-desk NEVER calls `/api/v1/*`.**
+
 ---
 
 ## n8n User Roles
@@ -318,6 +330,11 @@ n8n **is** the auth server. n8n-desk uses **dual auth** to bridge the two separa
 - Dual auth in `N8nApiClient` — auto-selects Cookie vs Bearer per endpoint path
 - Session cookie auto-refresh via `api:fetch` IPC proxy intercepting `set-cookie` headers
 - 4-step onboarding: URL → OAuth → Credentials → Connected
+
+**Key constraint — no public API:**
+- The public API (`/api/v1/*`) requires `X-N8N-API-KEY` header auth — session cookies do NOT work
+- n8n-desk uses `/rest/*` (internal REST API) for all non-MCP calls, same as n8n's own editor frontend
+- This is why credential login to `/rest/login` is required alongside MCP OAuth
 
 **Remaining gaps:**
 1. Extend MCP OAuth scopes from 2 → 13 for full MCP tool coverage (n8n side)
