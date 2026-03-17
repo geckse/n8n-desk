@@ -16,6 +16,7 @@
     "lint": "eslint 'src/**/*.{ts,vue}' 'electron/**/*.ts'"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@capacitor/android": "^6.2.1",
     "@capacitor/app": "^6.0.3",
     "@capacitor/core": "^6.2.1",
@@ -26,10 +27,6 @@
     "@capacitor/status-bar": "^6.0.3",
     "@ionic/vue": "^8.0.0",
     "@ionic/vue-router": "^8.0.0",
-    "ionicons": "^7.4.0",
-    "lucide-vue-next": "^0.577.0",
-    "pinia": "^2.2.0",
-    "vue": "^3.5.0",
     "@langchain/anthropic": "^0.3.0",
     "@langchain/core": "^0.3.0",
     "@langchain/langgraph": "^0.2.0",
@@ -37,8 +34,12 @@
     "@langchain/openai": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@n8n_io/n8n-demo-component": "^1.0.0",
-    "deepagents": "^0.1.0",
+    "deepagents": "^1.8.3",
+    "ionicons": "^7.4.0",
     "langchain": "^0.3.0",
+    "lucide-vue-next": "^0.577.0",
+    "pinia": "^2.2.0",
+    "vue": "^3.5.0",
     "vue-i18n": "^11.3.0",
     "vue-router": "^4.4.0",
     "zod": "^3.23.0"
