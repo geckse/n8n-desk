@@ -8,10 +8,11 @@ declare module '*.vue' {
 
 interface N8nDeskBridge {
   agent: {
-    invoke: (sessionId: string, message: string) => Promise<unknown>
-    stop: (sessionId: string) => Promise<void>
-    approve: (sessionId: string, decision: 'approve' | 'reject') => Promise<void>
-    onEvent: (callback: (event: unknown) => void) => void
+    invoke: (sessionId: string, message: string) => Promise<{ success: boolean; error?: string }>
+    stop: (sessionId: string) => Promise<{ success: boolean }>
+    approve: (sessionId: string, decision: 'approve' | 'reject') => Promise<{ success: boolean; error?: string }>
+    testConnection: () => Promise<{ success: boolean; error?: string }>
+    onEvent: (callback: (event: import('./src/types/agent').AgentEvent) => void) => () => void
   }
   storage: {
     read: (path: string) => Promise<string | null>

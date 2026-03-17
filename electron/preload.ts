@@ -8,8 +8,14 @@ contextBridge.exposeInMainWorld('n8nDesk', {
       ipcRenderer.invoke('agent:stop', sessionId),
     approve: (sessionId: string, decision: 'approve' | 'reject') =>
       ipcRenderer.invoke('agent:approve', sessionId, decision),
+    testConnection: () =>
+      ipcRenderer.invoke('agent:test-connection'),
     onEvent: (callback: (event: unknown) => void) => {
-      ipcRenderer.on('agent:event', (_event, data) => callback(data))
+      const listener = (_ipcEvent: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on('agent:event', listener)
+      return () => {
+        ipcRenderer.removeListener('agent:event', listener)
+      }
     },
   },
   storage: {
