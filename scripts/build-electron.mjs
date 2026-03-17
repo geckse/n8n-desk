@@ -1,8 +1,19 @@
 import { writeFileSync, mkdirSync } from 'fs'
-import { execSync } from 'child_process'
+import { build } from 'esbuild'
 
-// Compile Electron TypeScript with tsc
-execSync('tsc -p tsconfig.electron.json', { stdio: 'inherit' })
+// Bundle Electron TypeScript with esbuild
+// Uses CJS output format since Electron's main process requires it
+await build({
+  entryPoints: ['electron/main.ts', 'electron/preload.ts'],
+  outdir: 'electron/dist',
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node20',
+  external: ['electron'],
+  sourcemap: true,
+  logLevel: 'info',
+})
 
 // Add a package.json to the output dir that forces CJS mode,
 // overriding the root "type": "module" for Electron's main process
