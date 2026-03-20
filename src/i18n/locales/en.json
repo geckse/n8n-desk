@@ -287,6 +287,24 @@
       "save": "Save",
       "cancel": "Cancel",
       "saveFailed": "Failed to save server. Please try again."
+    },
+    "installConfirm": {
+      "title": "Install Plugin",
+      "description": "Review the details below before installing \"{name}\".",
+      "serverUrls": "Server URLs",
+      "authHeaders": "Required Auth Headers",
+      "noHeaders": "None",
+      "toolCount": "{count} tool discovered | {count} tools discovered",
+      "toolCountUnknown": "Tool count unavailable (auth may be required)",
+      "securityInfo": "Plugins connect to remote HTTP servers only. No code runs locally.",
+      "enterHeaderValues": "Enter values for required auth headers. Values are stored securely in the OS keychain.",
+      "headerValue": "Value for {name}",
+      "headerPlaceholder": "Enter value...",
+      "confirm": "Install",
+      "cancel": "Cancel",
+      "installing": "Installing...",
+      "previewFailed": "Failed to load plugin details. Please try again.",
+      "installFailed": "Installation failed. Please try again."
     }
   },
   "views": {
