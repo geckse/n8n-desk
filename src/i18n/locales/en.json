@@ -244,6 +244,17 @@
     "connectionLost": "Connection to n8n instance lost",
     "toolCallFailed": "Tool call failed: {tool}"
   },
+  "plugins": {
+    "card": {
+      "install": "Install",
+      "installing": "Installing...",
+      "uninstall": "Uninstall",
+      "enable": "Enable plugin",
+      "disable": "Disable plugin",
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    }
+  },
   "views": {
     "chatComingSoon": "Chat mode — coming soon",
     "coworkComingSoon": "Cowork mode — coming soon",
