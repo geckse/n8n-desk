@@ -305,6 +305,13 @@
       "installing": "Installing...",
       "previewFailed": "Failed to load plugin details. Please try again.",
       "installFailed": "Installation failed. Please try again."
+    },
+    "skill": {
+      "edit": "Edit",
+      "delete": "Delete",
+      "auto": "Auto",
+      "manual": "Manual",
+      "sourceUser": "User"
     }
   },
   "views": {
