@@ -6,8 +6,19 @@ import type { AgentStreamEvent, AgentRunnerConfig, LlmProviderConfig } from '../
 import { type AgentRunner } from '../agent/types'
 import { createAgentRunner, resolveLlmConfig } from '../agent/factory'
 import { refreshTokens } from '../oauth'
+import { pluginManager } from '../plugin-manager'
+import { loadAllSkills, buildSkillDescriptions } from '../skill-loader'
 
 const BASE_DIR = path.join(os.homedir(), '.n8n-desk')
+
+/** Built-in n8n MCP tools that always require user approval before execution. */
+const DESTRUCTIVE_TOOLS = [
+  'create_workflow_from_code',
+  'update_workflow',
+  'publish_workflow',
+  'archive_workflow',
+  'execute_workflow',
+]
 
 // --- Active runners ---
 
@@ -86,8 +97,10 @@ interface AuthMetadata {
 /**
  * Read the active instance config and get a valid access token.
  * Auto-refreshes the token if it has expired.
+ * Returns instanceId alongside url/accessToken so callers can scope
+ * plugin/server resolution to the correct instance.
  */
-async function readActiveInstanceConfig(): Promise<{ url: string; accessToken: string } | null> {
+async function readActiveInstanceConfig(): Promise<{ instanceId: string; url: string; accessToken: string } | null> {
   const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
   if (!config?.defaultInstanceId) return null
 
@@ -134,6 +147,7 @@ async function readActiveInstanceConfig(): Promise<{ url: string; accessToken: s
 
   console.log('[n8n-desk] Instance config loaded, token present:', !!tokens.access_token, 'length:', tokens.access_token.length)
   return {
+    instanceId,
     url: instance.url,
     accessToken: tokens.access_token,
   }
@@ -371,18 +385,69 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       }
       activeRunners.set(sessionId, active)
 
+      // --- Plugin & Skill Integration ---
+
+      const { instanceId } = instanceConfig
+
+      // Build custom MCP server configs from plugins + standalone servers.
+      // For Claude SDK: passed as customMcpServers (SDK handles tool discovery).
+      // For Deep Agents: pre-built as LangChain tools via buildDeepAgentsTools.
+      const customMcpServers = await pluginManager.buildClaudeSdkMcpServers(instanceId)
+      const customTools = backend === 'deep-agents'
+        ? await pluginManager.buildDeepAgentsTools(instanceId)
+        : undefined
+
+      // Load all skills and filter to auto-invocable ones.
+      // Skills with disableModelInvocation=true are only invocable via /skill-name
+      // in the chat input — they are not included in the system prompt.
+      const allSkills = await loadAllSkills()
+      const autoInvocableSkills = allSkills.filter((s) => !s.disableModelInvocation)
+
+      // Inject skill descriptions into the system prompt (lazy loading:
+      // only names + descriptions, NOT full content — expanded on invocation).
+      const skillBlock = buildSkillDescriptions(autoInvocableSkills)
+      const augmentedPrompt = skillBlock
+        ? `${workflowSystemPrompt}\n\n${skillBlock}`
+        : workflowSystemPrompt
+
+      // Compute extended interruptOnTools: built-in destructive tools + all tools
+      // from standalone servers that have requireApproval enabled.
+      // Tool names are namespaced as {serverName}__{toolName} for consistency
+      // with the Deep Agents tool naming convention.
+      const approvalServerNames = await pluginManager.getApprovalRequiredServerNames(instanceId)
+      const approvalToolNames: string[] = []
+
+      for (const serverName of approvalServerNames) {
+        const serverConfig = customMcpServers[serverName]
+        if (!serverConfig) continue
+        try {
+          const discoveredTools = await pluginManager.discoverTools(
+            serverConfig.url,
+            serverConfig.headers,
+          )
+          for (const t of discoveredTools) {
+            approvalToolNames.push(`${serverName}__${t.name}`)
+          }
+        } catch {
+          // Server unreachable — skip, don't block agent startup.
+          // Tools from this server won't work anyway.
+        }
+      }
+
+      const interruptOnTools = [
+        ...DESTRUCTIVE_TOOLS,
+        ...approvalToolNames,
+      ]
+
       const runnerConfig: AgentRunnerConfig = {
         instanceUrl: instanceConfig.url,
         accessToken: instanceConfig.accessToken,
         llmConfig,
-        systemPrompt: workflowSystemPrompt,
-        interruptOnTools: [
-          'create_workflow_from_code',
-          'update_workflow',
-          'publish_workflow',
-          'archive_workflow',
-          'execute_workflow',
-        ],
+        systemPrompt: augmentedPrompt,
+        interruptOnTools,
+        customMcpServers,
+        customTools,
+        skills: autoInvocableSkills,
       }
 
       // Run agent and stream events
