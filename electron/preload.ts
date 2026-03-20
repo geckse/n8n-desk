@@ -66,4 +66,59 @@ contextBridge.exposeInMainWorld('n8nDesk', {
     delete: (key: string) =>
       ipcRenderer.invoke('keychain:delete', key),
   },
+  plugins: {
+    // Marketplace
+    marketplaceList: () =>
+      ipcRenderer.invoke('plugins:marketplace-list'),
+    marketplaceAdd: (source: { source: 'github' | 'url' | 'local'; repo?: string; url?: string; ref?: string }) =>
+      ipcRenderer.invoke('plugins:marketplace-add', source),
+    marketplaceRemove: (id: string) =>
+      ipcRenderer.invoke('plugins:marketplace-remove', id),
+    marketplaceRefresh: (id: string) =>
+      ipcRenderer.invoke('plugins:marketplace-refresh', id),
+
+    // Browse
+    browse: (marketplaceId?: string) =>
+      ipcRenderer.invoke('plugins:browse', marketplaceId),
+
+    // Plugin lifecycle
+    installedList: () =>
+      ipcRenderer.invoke('plugins:installed-list'),
+    install: (name: string, marketplaceId: string) =>
+      ipcRenderer.invoke('plugins:install', name, marketplaceId),
+    uninstall: (id: string) =>
+      ipcRenderer.invoke('plugins:uninstall', id),
+    enable: (id: string) =>
+      ipcRenderer.invoke('plugins:enable', id),
+    disable: (id: string) =>
+      ipcRenderer.invoke('plugins:disable', id),
+    previewInstall: (name: string, marketplaceId: string) =>
+      ipcRenderer.invoke('plugins:preview-install', name, marketplaceId),
+
+    // Standalone MCP servers
+    serversList: () =>
+      ipcRenderer.invoke('plugins:servers-list'),
+    serversAdd: (config: { name: string; description?: string; url: string; headerNames?: string[]; enabled: boolean; requireApproval: boolean }) =>
+      ipcRenderer.invoke('plugins:servers-add', config),
+    serversUpdate: (id: string, updates: Record<string, unknown>) =>
+      ipcRenderer.invoke('plugins:servers-update', id, updates),
+    serversRemove: (id: string) =>
+      ipcRenderer.invoke('plugins:servers-remove', id),
+    serversTest: (url: string, headers: Record<string, string>) =>
+      ipcRenderer.invoke('plugins:servers-test', url, headers),
+
+    // Secret management
+    setSecret: (namespace: 'plugin' | 'server', id: string, headerName: string, value: string) =>
+      ipcRenderer.invoke('plugins:set-secret', namespace, id, headerName, value),
+    deleteSecrets: (namespace: 'plugin' | 'server', id: string) =>
+      ipcRenderer.invoke('plugins:delete-secrets', namespace, id),
+
+    // Skills
+    listSkills: () =>
+      ipcRenderer.invoke('plugins:list-skills'),
+    saveSkill: (skill: { name: string; content: string }) =>
+      ipcRenderer.invoke('plugins:save-skill', skill),
+    deleteSkill: (name: string) =>
+      ipcRenderer.invoke('plugins:delete-skill', name),
+  },
 })
