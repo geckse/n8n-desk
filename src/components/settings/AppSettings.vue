@@ -3,12 +3,13 @@ import { IonInput, IonSelect, IonSelectOption, IonButton } from '@ionic/vue'
 import { ref, reactive, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  Settings as SettingsIcon, Trash2, Bot,
+  Settings as SettingsIcon, Trash2, Bot, Plug,
 } from 'lucide-vue-next'
 import SettingsModal from '@/components/ui/SettingsModal.vue'
 import SettingsNavGroup from '@/components/ui/SettingsNavGroup.vue'
 import SettingsNavItem from '@/components/ui/SettingsNavItem.vue'
 import LlmSettings from '@/components/settings/LlmSettings.vue'
+import PluginSettings from '@/components/settings/PluginSettings.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useInstancesStore } from '@/stores/instances'
 import { useAuthStore } from '@/stores/auth'
@@ -153,6 +154,13 @@ function getHostname(url: string): string {
           <template #icon><Bot :size="16" /></template>
           {{ t('settings.sections.aiAgent') }}
         </SettingsNavItem>
+        <SettingsNavItem
+          :active="activeSection === 'plugins'"
+          @click="activeSection = 'plugins'"
+        >
+          <template #icon><Plug :size="16" /></template>
+          {{ t('settings.sections.plugins') }}
+        </SettingsNavItem>
       </SettingsNavGroup>
 
       <SettingsNavGroup :label="t('settings.sections.instances')">
@@ -216,6 +224,11 @@ function getHostname(url: string): string {
         <h3 class="section-title">{{ t('settings.sections.aiAgent') }}</h3>
         <p class="section-description">{{ t('settings.ai.description') }}</p>
         <LlmSettings />
+      </div>
+
+      <!-- Plugins & Skills -->
+      <div v-else-if="activeSection === 'plugins'" class="section-content">
+        <PluginSettings />
       </div>
 
       <!-- Instance Settings -->

@@ -44,7 +44,8 @@
       "general": "General",
       "instances": "Instances",
       "dangerZone": "Danger Zone",
-      "aiAgent": "AI / Agent"
+      "aiAgent": "AI / Agent",
+      "plugins": "Plugins"
     },
     "ai": {
       "description": "Configure the AI backend for Cowork and Workflow modes.",
