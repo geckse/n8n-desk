@@ -369,6 +369,14 @@
       "manual": "Manual",
       "sourceUser": "User"
     },
+    "popover": {
+      "plugins": "Plugins",
+      "servers": "Servers",
+      "noPlugins": "No plugins installed",
+      "noServers": "No servers configured",
+      "empty": "No plugins or servers configured. Add them in Settings.",
+      "manageInSettings": "Manage in Settings"
+    },
     "skillEditor": {
       "title": "Create Skill",
       "titleEdit": "Edit Skill",
