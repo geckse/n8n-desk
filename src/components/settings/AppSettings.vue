@@ -3,13 +3,15 @@ import { IonInput, IonSelect, IonSelectOption, IonButton } from '@ionic/vue'
 import { ref, reactive, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  Settings as SettingsIcon, Trash2, Bot, Plug,
+  Settings as SettingsIcon, Trash2, Bot, Zap, Plug, Package,
 } from 'lucide-vue-next'
 import SettingsModal from '@/components/ui/SettingsModal.vue'
 import SettingsNavGroup from '@/components/ui/SettingsNavGroup.vue'
 import SettingsNavItem from '@/components/ui/SettingsNavItem.vue'
 import LlmSettings from '@/components/settings/LlmSettings.vue'
-import PluginSettings from '@/components/settings/PluginSettings.vue'
+import SkillsSettings from '@/components/settings/SkillsSettings.vue'
+import ConnectorsSettings from '@/components/settings/ConnectorsSettings.vue'
+import PluginsSettings from '@/components/settings/PluginsSettings.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useInstancesStore } from '@/stores/instances'
 import { useAuthStore } from '@/stores/auth'
@@ -30,7 +32,7 @@ const instancesStore = useInstancesStore()
 const authStore = useAuthStore()
 const { applyTheme } = useTheme()
 
-const activeSection = ref('general')
+const activeSection = ref(settingsStore.settingsSection ?? 'general')
 
 // --- Draft state (editable copies, saved on "Save") ---
 const draft = reactive({
@@ -46,6 +48,7 @@ const PRESET_COLORS = [
 // Reset draft when modal opens
 watch(() => props.isOpen, async (open) => {
   if (open) {
+    activeSection.value = settingsStore.settingsSection ?? 'general'
     await settingsStore.hydrateLlm()
     draft.theme = settingsStore.theme
     draft.locale = settingsStore.locale
@@ -55,7 +58,6 @@ watch(() => props.isOpen, async (open) => {
       color: i.color,
       url: i.url,
     }))
-    activeSection.value = 'general'
   }
 })
 
@@ -155,10 +157,24 @@ function getHostname(url: string): string {
           {{ t('settings.sections.aiAgent') }}
         </SettingsNavItem>
         <SettingsNavItem
+          :active="activeSection === 'skills'"
+          @click="activeSection = 'skills'"
+        >
+          <template #icon><Zap :size="16" /></template>
+          {{ t('settings.sections.skills') }}
+        </SettingsNavItem>
+        <SettingsNavItem
+          :active="activeSection === 'connectors'"
+          @click="activeSection = 'connectors'"
+        >
+          <template #icon><Plug :size="16" /></template>
+          {{ t('settings.sections.connectors') }}
+        </SettingsNavItem>
+        <SettingsNavItem
           :active="activeSection === 'plugins'"
           @click="activeSection = 'plugins'"
         >
-          <template #icon><Plug :size="16" /></template>
+          <template #icon><Package :size="16" /></template>
           {{ t('settings.sections.plugins') }}
         </SettingsNavItem>
       </SettingsNavGroup>
@@ -226,9 +242,19 @@ function getHostname(url: string): string {
         <LlmSettings />
       </div>
 
-      <!-- Plugins & Skills -->
+      <!-- Skills -->
+      <div v-else-if="activeSection === 'skills'" class="section-content">
+        <SkillsSettings />
+      </div>
+
+      <!-- Connectors -->
+      <div v-else-if="activeSection === 'connectors'" class="section-content">
+        <ConnectorsSettings />
+      </div>
+
+      <!-- Plugins -->
       <div v-else-if="activeSection === 'plugins'" class="section-content">
-        <PluginSettings />
+        <PluginsSettings />
       </div>
 
       <!-- Instance Settings -->

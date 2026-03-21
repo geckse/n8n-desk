@@ -132,11 +132,98 @@ export const useWorkflowSessionsStore = defineStore('workflow-sessions', () => {
       sessionFilePath(currentInstanceId, sessionId)
     )
     pendingApproval.value = null
-    toolCalls.value = []
-    previewData.value = null
     isPanelOpen.value = false
     panelWorkflowId.value = null
     workflowHistory.value.clear()
+
+    // Reconstruct toolCalls from loaded tool messages so cards render properly
+    const reconstructed: AgentToolCall[] = []
+    for (const msg of messages.value) {
+      if (msg.role !== 'tool' || !msg.meta) continue
+      const meta = msg.meta as Record<string, unknown>
+      const toolCallId = meta.toolCallId as string | undefined
+      const toolName = meta.toolName as string | undefined
+      if (!toolCallId) continue
+
+      const status = meta.status as string | undefined
+      const tc: AgentToolCall = {
+        id: toolCallId,
+        name: toolName ?? 'unknown',
+        args: {},
+        status: status === 'completed' ? 'completed'
+          : status === 'failed' ? 'failed'
+            : 'completed', // default to completed for old sessions
+      }
+
+      if (msg.content) {
+        tc.result = msg.content
+      }
+      if (meta.error) {
+        tc.status = 'failed'
+      }
+
+      // Check if this toolCall already exists (tool_call_start + tool_call_result produce 2 messages)
+      const existing = reconstructed.find((t) => t.id === toolCallId)
+      if (existing) {
+        // Update with result data
+        if (msg.content) existing.result = msg.content
+        if (status) existing.status = tc.status
+        if (meta.error) existing.status = 'failed'
+      } else {
+        reconstructed.push(tc)
+      }
+    }
+    toolCalls.value = reconstructed
+
+    // Extract workflow JSON from tool results to rebuild previews
+    previewData.value = null
+    for (const msg of messages.value) {
+      if (msg.role !== 'tool' || !msg.content) continue
+      try {
+        const parsed = JSON.parse(msg.content) as Record<string, unknown>
+        // Look for workflow JSON in tool results
+        const wf = extractWorkflowFromResult(parsed)
+        if (wf) {
+          const wfId = (wf.id as string) ?? ''
+          if (wfId) {
+            workflowHistory.value.set(wfId, structuredClone(wf) as WorkflowJson)
+          }
+          // Keep the last workflow as the preview
+          previewData.value = {
+            workflowId: wfId,
+            name: (wf.name as string) ?? 'Workflow',
+            workflow: wf as WorkflowJson,
+          }
+        }
+      } catch {
+        // Not JSON or no workflow — skip
+      }
+    }
+  }
+
+  /**
+   * Try to extract a workflow JSON object from a tool result.
+   * Tool results may contain workflow data directly or nested in a response wrapper.
+   */
+  function extractWorkflowFromResult(data: Record<string, unknown>): Record<string, unknown> | null {
+    // Direct workflow object (has nodes + connections)
+    if (data.nodes && data.connections) return data
+
+    // Wrapped in a response (e.g., { workflow: { ... } })
+    if (data.workflow && typeof data.workflow === 'object') {
+      const wf = data.workflow as Record<string, unknown>
+      if (wf.nodes && wf.connections) return wf
+    }
+
+    // Some MCP tools return stringified JSON in a text content block
+    if (typeof data.text === 'string') {
+      try {
+        const parsed = JSON.parse(data.text) as Record<string, unknown>
+        if (parsed.nodes && parsed.connections) return parsed
+      } catch { /* not JSON */ }
+    }
+
+    return null
   }
 
   /**
@@ -173,6 +260,22 @@ export const useWorkflowSessionsStore = defineStore('workflow-sessions', () => {
 
   function handleAgentEvent(event: AgentEvent): void {
     switch (event.type) {
+      case 'thinking': {
+        // Accumulate thinking into the last thinking message, or create one
+        const lastThinking = messages.value[messages.value.length - 1]
+        if (lastThinking && lastThinking.role === 'thinking') {
+          lastThinking.content += event.data.text
+        } else {
+          const msg: SessionMessage = {
+            id: `msg_${Date.now()}`,
+            role: 'thinking',
+            content: event.data.text,
+            ts: new Date().toISOString(),
+          }
+          messages.value.push(msg)
+        }
+        break
+      }
       case 'text_chunk': {
         // Accumulate text into the last assistant message, or create one
         const last = messages.value[messages.value.length - 1]

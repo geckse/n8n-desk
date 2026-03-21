@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { IonPage } from '@ionic/vue'
 import { useWorkflowSessionsStore } from '@/stores/workflow-sessions'
+import { usePluginsStore } from '@/stores/plugins'
 import WorkflowChatPanel from '@/components/workflow/WorkflowChatPanel.vue'
 import WorkflowPreviewPanel from '@/components/workflow/WorkflowPreviewPanel.vue'
 
@@ -10,6 +11,12 @@ const MIN_PREVIEW_WIDTH = 280
 const MAX_PREVIEW_WIDTH = 700
 
 const sessionStore = useWorkflowSessionsStore()
+const pluginsStore = usePluginsStore()
+
+// Hydrate plugins/connectors/skills on view mount so the PlusMenu has data
+onMounted(() => {
+  void pluginsStore.hydrate()
+})
 const previewWidth = ref(DEFAULT_PREVIEW_WIDTH)
 const isResizing = ref(false)
 

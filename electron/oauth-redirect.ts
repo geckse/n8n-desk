@@ -52,14 +52,29 @@ export function handleCallbackUrl(callbackUrl: string): boolean {
   }
 }
 
+/** Fixed port for custom server OAuth — predictable redirect URI for pre-registered apps. */
+export const CUSTOM_OAUTH_PORT = 27182
+
 /**
- * Start a localhost HTTP server on a random port to receive the OAuth callback.
- * Returns a promise that resolves once the server is listening and the port is known.
+ * Start a localhost HTTP server to receive the OAuth callback.
+ * Port 0 = OS picks a random port. A fixed port allows pre-registered redirect URIs.
  */
-function startLocalhostServer(): Promise<RedirectListener> {
-  return new Promise<RedirectListener>((resolveListener) => {
+function startLocalhostServer(port = 0): Promise<RedirectListener> {
+  return new Promise<RedirectListener>((resolveListener, rejectListener) => {
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null
     let server: http.Server | null = null
+    let settled = false
+
+    const cleanup = () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle)
+        timeoutHandle = null
+      }
+      if (server) {
+        try { server.close() } catch { /* best-effort */ }
+        server = null
+      }
+    }
 
     const callbackPromise = new Promise<OAuthCallback>((resolveCallback, rejectCallback) => {
       server = http.createServer((req, res) => {
@@ -75,7 +90,6 @@ function startLocalhostServer(): Promise<RedirectListener> {
         const state = url.searchParams.get('state')
         const error = url.searchParams.get('error')
 
-        // Respond with a page the user can close
         res.writeHead(200, { 'Content-Type': 'text/html' })
         res.end(`<!DOCTYPE html>
 <html>
@@ -88,6 +102,7 @@ function startLocalhostServer(): Promise<RedirectListener> {
 </body>
 </html>`)
 
+        settled = true
         if (error) {
           rejectCallback(new Error(`OAuth error: ${error}`))
         } else if (code && state) {
@@ -97,33 +112,34 @@ function startLocalhostServer(): Promise<RedirectListener> {
         }
       })
 
+      // Handle server errors (e.g., EADDRINUSE)
+      server.on('error', (err: NodeJS.ErrnoException) => {
+        cleanup()
+        if (err.code === 'EADDRINUSE') {
+          rejectListener(new Error(`Port ${port} is already in use. Close any previous OAuth flow and try again.`))
+        } else {
+          rejectListener(err)
+        }
+      })
+
       // 5-minute timeout
       timeoutHandle = setTimeout(() => {
+        settled = true
+        cleanup()
         rejectCallback(new Error('OAuth callback timed out after 5 minutes'))
       }, 5 * 60 * 1000)
 
-      // Listen on port 0 = OS picks a random available port
-      server.listen(0, '127.0.0.1', () => {
+      server.listen(port, '127.0.0.1', () => {
         const addr = server!.address()
-        const port = typeof addr === 'object' && addr ? addr.port : 0
+        const listenPort = typeof addr === 'object' && addr ? addr.port : 0
 
-        console.log(`[oauth-redirect] Localhost callback server listening on port ${port}`)
+        console.log(`[oauth-redirect] Localhost callback server listening on port ${listenPort}`)
 
-        const cleanup = () => {
-          if (timeoutHandle) {
-            clearTimeout(timeoutHandle)
-            timeoutHandle = null
-          }
-          if (server) {
-            server.close()
-            server = null
-          }
-        }
-
-        callbackPromise.finally(cleanup)
+        // Cleanup after the callback promise settles
+        callbackPromise.then(() => cleanup(), () => cleanup())
 
         resolveListener({
-          redirectUri: `http://127.0.0.1:${port}/callback`,
+          redirectUri: `http://127.0.0.1:${listenPort}/callback`,
           waitForCallback: () => callbackPromise,
           cleanup,
         })
@@ -138,7 +154,7 @@ function startLocalhostServer(): Promise<RedirectListener> {
  * In production: tries the n8ndesk:// custom protocol first, falls back to localhost.
  * In dev: always uses localhost (custom protocol opens a new Electron process in dev).
  */
-export async function startOAuthRedirectListener(options?: { forceLocalhost?: boolean }): Promise<RedirectListener> {
+export async function startOAuthRedirectListener(options?: { forceLocalhost?: boolean; port?: number }): Promise<RedirectListener> {
   const isDev = !app.isPackaged
 
   // In production, try custom protocol first (unless forceLocalhost is set)
@@ -181,5 +197,5 @@ export async function startOAuthRedirectListener(options?: { forceLocalhost?: bo
     console.log('[oauth-redirect] Custom protocol not registered — using localhost callback server')
   }
 
-  return startLocalhostServer()
+  return startLocalhostServer(options?.port ?? 0)
 }

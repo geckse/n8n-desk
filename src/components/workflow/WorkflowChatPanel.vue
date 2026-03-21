@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { IonIcon } from '@ionic/vue'
 import { sendOutline, settingsOutline } from 'ionicons/icons'
-import { Plug } from 'lucide-vue-next'
+import { Plus, ChevronDown, ChevronRight, Brain } from 'lucide-vue-next'
 import { useWorkflowAgent } from '@/composables/useWorkflowAgent'
 import { useSettingsStore } from '@/stores/settings'
 import { useWorkflowSessionsStore } from '@/stores/workflow-sessions'
@@ -13,7 +13,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import ToolCallCard from './ToolCallCard.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import WorkflowInlineCard from './WorkflowInlineCard.vue'
-import PluginPopover from '@/components/plugins/PluginPopover.vue'
+import PlusMenu from '@/components/plugins/PlusMenu.vue'
 
 const {
   messages,
@@ -33,8 +33,32 @@ const inputText = ref('')
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const scrollContainerRef = ref<HTMLDivElement | null>(null)
 
-// --- Plugin popover ---
-const pluginPopoverOpen = ref(false)
+// --- Plus menu ---
+const plusMenuOpen = ref(false)
+
+// --- Thinking toggle ---
+const expandedThinking = ref<Set<string>>(new Set())
+
+function toggleThinking(msgId: string) {
+  const next = new Set(expandedThinking.value)
+  if (next.has(msgId)) {
+    next.delete(msgId)
+  } else {
+    next.add(msgId)
+  }
+  expandedThinking.value = next
+}
+const sessionDisabledSkills = ref<Set<string>>(new Set())
+
+function handleSessionSkillToggle(skillName: string) {
+  const next = new Set(sessionDisabledSkills.value)
+  if (next.has(skillName)) {
+    next.delete(skillName)
+  } else {
+    next.add(skillName)
+  }
+  sessionDisabledSkills.value = next
+}
 
 // --- Skill autocomplete ---
 const autocompleteIndex = ref(0)
@@ -88,10 +112,6 @@ function resolveSkillInput(text: string): string {
   if (!skill) return text // Not a known skill — send as-is
 
   return skill.content.replace(/\$ARGUMENTS/g, args)
-}
-
-function handleManagePluginSettings() {
-  pluginPopoverOpen.value = false
 }
 
 const canSend = computed(() =>
@@ -252,15 +272,21 @@ function scrollToBottom() {
 watch(
   () => messages.value.length,
   () => nextTick(scrollToBottom),
+  { flush: 'post' },
 )
 
-// Also scroll when streaming text chunks update the last message
+// Also scroll when streaming text chunks update the last message (debounced)
+let scrollDebounce: ReturnType<typeof setTimeout> | null = null
 watch(
-  () => messages.value[messages.value.length - 1]?.content,
-  () => nextTick(scrollToBottom),
+  () => messages.value[messages.value.length - 1]?.content?.length,
+  () => {
+    if (scrollDebounce) clearTimeout(scrollDebounce)
+    scrollDebounce = setTimeout(scrollToBottom, 50)
+  },
+  { flush: 'post' },
 )
 
-watch(isRunning, () => nextTick(scrollToBottom))
+watch(isRunning, () => nextTick(scrollToBottom), { flush: 'post' })
 
 onMounted(scrollToBottom)
 </script>
@@ -282,6 +308,26 @@ onMounted(scrollToBottom)
         <!-- User message -->
         <div v-if="msg.role === 'user'" :class="$style.userMsg">
           <div :class="$style.userBubble">{{ msg.content }}</div>
+        </div>
+
+        <!-- Thinking (collapsible) -->
+        <div v-else-if="msg.role === 'thinking'" :class="$style.thinkingMsg">
+          <button
+            :class="$style.thinkingToggle"
+            @click="toggleThinking(msg.id)"
+          >
+            <Brain :size="14" :class="$style.thinkingIcon" />
+            <span>Thinking</span>
+            <component
+              :is="expandedThinking.has(msg.id) ? ChevronDown : ChevronRight"
+              :size="14"
+              :class="$style.thinkingChevron"
+            />
+          </button>
+          <pre
+            v-if="expandedThinking.has(msg.id)"
+            :class="$style.thinkingContent"
+          >{{ msg.content }}</pre>
         </div>
 
         <!-- Assistant message -->
@@ -371,14 +417,23 @@ onMounted(scrollToBottom)
         </div>
 
         <div :class="$style.inputRow">
-          <button
-            id="workflow-plugin-trigger"
-            :class="$style.pluginBtn"
-            title="Plugins"
-            @click="pluginPopoverOpen = !pluginPopoverOpen"
-          >
-            <Plug :size="16" />
-          </button>
+          <div :class="$style.plusBtnWrap">
+            <button
+              id="plus-menu-trigger"
+              :class="$style.plusBtn"
+              title="Skills, Connectors & Plugins"
+              @click.stop="plusMenuOpen = !plusMenuOpen"
+            >
+              <Plus :size="18" />
+            </button>
+            <PlusMenu
+              :is-open="plusMenuOpen"
+              trigger="plus-menu-trigger"
+              :session-disabled-skills="sessionDisabledSkills"
+              @update:is-open="plusMenuOpen = $event"
+              @toggle-session-skill="handleSessionSkillToggle"
+            />
+          </div>
           <textarea
             ref="textareaRef"
             v-model="inputText"
@@ -400,12 +455,6 @@ onMounted(scrollToBottom)
       </div>
     </div>
 
-    <!-- Plugin popover -->
-    <PluginPopover
-      v-model:is-open="pluginPopoverOpen"
-      trigger="workflow-plugin-trigger"
-      @manage-settings="handleManagePluginSettings"
-    />
   </div>
 </template>
 
@@ -464,6 +513,55 @@ onMounted(scrollToBottom)
   font-size: 13px;
   color: var(--color--text--tint-1);
   margin: 0;
+}
+
+// --- Thinking ---
+.thinkingMsg {
+  max-width: 90%;
+}
+
+.thinkingToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--n8n-desk--surface-raised-bg, var(--color--foreground));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color--text--tint-1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+
+  &:hover {
+    background: var(--n8n-desk--surface-bg, var(--color--foreground));
+    color: var(--color--text--shade-1);
+  }
+}
+
+.thinkingIcon {
+  color: var(--color--text--tint-2);
+}
+
+.thinkingChevron {
+  color: var(--color--text--tint-2);
+}
+
+.thinkingContent {
+  margin: 6px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--n8n-desk--surface-bg, var(--color--foreground));
+  border: 1px solid var(--n8n-desk--surface-raised-bg, var(--color--foreground));
+  font-size: 12px;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  line-height: 1.5;
+  color: var(--color--text--tint-1);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .userMsg {
@@ -736,13 +834,18 @@ onMounted(scrollToBottom)
   }
 }
 
-.pluginBtn {
+.plusBtnWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.plusBtn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
   border: 1px solid var(--n8n-desk--surface-raised-bg, var(--color--foreground));
   background: var(--n8n-desk--surface-bg, var(--color--foreground));
   color: var(--color--text--tint-1);
@@ -751,8 +854,8 @@ onMounted(scrollToBottom)
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 
   &:hover {
-    color: var(--color--primary, #ff6d5a);
-    border-color: var(--color--primary, #ff6d5a);
+    color: var(--color--text--shade-1);
+    border-color: var(--color--text--tint-2);
     background: var(--n8n-desk--surface-raised-bg, var(--color--foreground));
   }
 }

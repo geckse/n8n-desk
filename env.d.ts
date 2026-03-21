@@ -71,6 +71,7 @@ interface N8nDeskBridge {
       name: string
       description?: string
       url: string
+      authType?: 'static-headers' | 'oauth'
       headerNames?: string[]
       enabled: boolean
       requireApproval: boolean
@@ -80,6 +81,17 @@ interface N8nDeskBridge {
     serversRemove: (id: string) => Promise<{ success: true } | { success: false; error: string }>
     serversTest: (url: string, headers: Record<string, string>) =>
       Promise<{ success: true; tools: import('./src/types/plugin').DiscoveredTool[] } | { success: false; error: string }>
+    serversTestById: (serverId: string) =>
+      Promise<{ success: true; tools: import('./src/types/plugin').DiscoveredTool[] } | { success: false; error: string }>
+
+    // Server OAuth
+    serverProbeOAuth: (serverUrl: string) => Promise<{ supportsOAuth: boolean }>
+    serverOAuthConnect: (params: { serverId: string; serverUrl: string; clientId?: string; clientSecret?: string }) =>
+      Promise<{ success: boolean; expiresAt?: string; scope?: string; error?: string; needsManualClient?: boolean }>
+    serverOAuthDisconnect: (params: { serverId: string }) =>
+      Promise<{ success: boolean; error?: string }>
+    serverOAuthRefresh: (params: { serverId: string }) =>
+      Promise<{ success: boolean; expiresAt?: string; error?: string }>
 
     // Secret management
     setSecret: (namespace: 'plugin' | 'server', id: string, headerName: string, value: string) =>

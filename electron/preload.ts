@@ -98,7 +98,7 @@ contextBridge.exposeInMainWorld('n8nDesk', {
     // Standalone MCP servers
     serversList: () =>
       ipcRenderer.invoke('plugins:servers-list'),
-    serversAdd: (config: { name: string; description?: string; url: string; headerNames?: string[]; enabled: boolean; requireApproval: boolean }) =>
+    serversAdd: (config: { name: string; description?: string; url: string; authType?: 'static-headers' | 'oauth'; headerNames?: string[]; enabled: boolean; requireApproval: boolean }) =>
       ipcRenderer.invoke('plugins:servers-add', config),
     serversUpdate: (id: string, updates: Record<string, unknown>) =>
       ipcRenderer.invoke('plugins:servers-update', id, updates),
@@ -106,12 +106,24 @@ contextBridge.exposeInMainWorld('n8nDesk', {
       ipcRenderer.invoke('plugins:servers-remove', id),
     serversTest: (url: string, headers: Record<string, string>) =>
       ipcRenderer.invoke('plugins:servers-test', url, headers),
+    serversTestById: (serverId: string) =>
+      ipcRenderer.invoke('plugins:servers-test-by-id', serverId),
 
     // Secret management
     setSecret: (namespace: 'plugin' | 'server', id: string, headerName: string, value: string) =>
       ipcRenderer.invoke('plugins:set-secret', namespace, id, headerName, value),
     deleteSecrets: (namespace: 'plugin' | 'server', id: string) =>
       ipcRenderer.invoke('plugins:delete-secrets', namespace, id),
+
+    // Server OAuth
+    serverProbeOAuth: (serverUrl: string) =>
+      ipcRenderer.invoke('plugins:server-probe-oauth', { serverUrl }),
+    serverOAuthConnect: (params: { serverId: string; serverUrl: string; clientId?: string; clientSecret?: string }) =>
+      ipcRenderer.invoke('plugins:server-oauth-connect', params),
+    serverOAuthDisconnect: (params: { serverId: string }) =>
+      ipcRenderer.invoke('plugins:server-oauth-disconnect', params),
+    serverOAuthRefresh: (params: { serverId: string }) =>
+      ipcRenderer.invoke('plugins:server-oauth-refresh', params),
 
     // Skills
     listSkills: () =>

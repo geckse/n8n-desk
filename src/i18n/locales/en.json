@@ -45,6 +45,8 @@
       "instances": "Instances",
       "dangerZone": "Danger Zone",
       "aiAgent": "AI / Agent",
+      "skills": "Skills",
+      "connectors": "Connectors",
       "plugins": "Plugins"
     },
     "ai": {
@@ -249,6 +251,10 @@
     "settings": {
       "title": "Plugins & Skills",
       "description": "Manage plugins, MCP servers, marketplaces, and skills.",
+      "pluginsDescription": "Install and manage plugins from marketplaces to extend the agent with additional tools.",
+      "connectors": {
+        "description": "Manage MCP server connections. The built-in n8n MCP is always active."
+      },
       "tabs": {
         "installed": "Installed",
         "discover": "Discover",
@@ -256,6 +262,10 @@
         "skills": "Skills"
       },
       "installed": {
+        "builtInTitle": "Default",
+        "builtInBadge": "Official",
+        "builtInDescription": "13 workflow tools via your connected n8n instance. Always active.",
+        "builtInAlwaysOn": "Always on",
         "pluginsTitle": "Installed Plugins",
         "pluginsEmpty": "No plugins installed yet. Browse the marketplace to find plugins.",
         "serversTitle": "MCP Servers",
@@ -294,9 +304,13 @@
         "addFailed": "Failed to add marketplace. Please try again."
       },
       "skills": {
-        "title": "Skills",
-        "description": "Create and manage custom skills for the AI agent.",
-        "empty": "No skills loaded. Create a skill to get started.",
+        "builtInTitle": "Built-in Skills",
+        "builtInDescription": "Skills optimized for n8n-desk. Updated automatically with the app.",
+        "backToList": "Back to list",
+        "title": "Custom Skills",
+        "settingsDescription": "Manage built-in and custom skills that guide the AI agent's behavior.",
+        "description": "Create your own skills for the AI agent.",
+        "empty": "No custom skills yet. Create one to get started.",
         "createSkill": "Create Skill",
         "deleteConfirm": "Delete skill \"{name}\"? This cannot be undone."
       }
@@ -315,7 +329,9 @@
       "disable": "Disable server",
       "edit": "Edit server",
       "delete": "Delete server",
-      "requiresApproval": "Requires approval"
+      "requiresApproval": "Requires approval",
+      "oauthConnected": "OAuth",
+      "oauthNotConnected": "Not Connected"
     },
     "addServer": {
       "title": "Add MCP Server",
@@ -334,8 +350,30 @@
       "headerNamePlaceholder": "Authorization",
       "headerValue": "Header value",
       "headerValuePlaceholder": "Bearer sk-...",
+      "headerValueKept": "Stored securely — leave blank to keep",
       "addHeader": "Add header",
       "removeHeader": "Remove header",
+      "authType": "Authentication",
+      "authTypeStaticHeaders": "Static Headers",
+      "authTypeOAuth": "OAuth 2.0",
+      "oauthConnect": "Connect with OAuth",
+      "oauthConnecting": "Waiting for authorization...",
+      "oauthConnected": "Connected",
+      "oauthDisconnect": "Disconnect",
+      "oauthExpiry": "Expires {time}",
+      "oauthClientId": "Client ID",
+      "oauthClientIdPlaceholder": "Leave empty for auto-registration",
+      "oauthClientIdHint": "Optional. Required if the server doesn't support dynamic registration.",
+      "oauthClientSecret": "Client Secret",
+      "oauthClientSecretPlaceholder": "Leave empty if not required",
+      "oauthClientSecretHint": "Optional. Some servers require a client secret.",
+      "oauthRedirectUri": "Redirect URI",
+      "oauthRedirectUriHint": "Use this as the redirect/callback URL when registering your OAuth app.",
+      "oauthHint": "Click Connect to authorize via OAuth 2.0. A browser window will open.",
+      "oauthProbed": "This server supports OAuth 2.0",
+      "oauthError": "OAuth connection failed",
+      "oauthNeedsClientId": "This server doesn't support auto-registration. Enter your Client ID above and try again.",
+      "oauthTryAgain": "Try Again",
       "requireApproval": "Require approval",
       "requireApprovalHint": "Ask for confirmation before executing tools from this server",
       "testConnection": "Test Connection",
@@ -369,11 +407,36 @@
       "delete": "Delete",
       "auto": "Auto",
       "manual": "Manual",
-      "sourceUser": "User"
+      "sourceUser": "User",
+      "view": "View",
+      "sourceBuiltIn": "Built-in",
+      "builtInDisabledWarning": "This skill is optimized for n8n-desk. If disabled, consider adding alternative n8n-related skills for best results."
+    },
+    "plusMenu": {
+      "skills": "Skills",
+      "connectors": "Connectors",
+      "plugins": "Plugins",
+      "noSkills": "No skills available",
+      "noConnectors": "No connectors configured",
+      "noPlugins": "No plugins installed",
+      "manageSkills": "Manage skills",
+      "manageConnectors": "Manage connectors",
+      "managePlugins": "Manage plugins",
+      "addPlugin": "Add plugin"
+    },
+    "skillsPopover": {
+      "title": "Active Skills",
+      "hint": "Toggle skills on/off for this session. Disabled skills won't be used by the agent.",
+      "builtIn": "Built-in",
+      "custom": "Custom"
     },
     "popover": {
       "plugins": "Plugins",
       "servers": "Servers",
+      "skills": "Skills",
+      "extensions": "Extensions",
+      "active": "active",
+      "alwaysOn": "Always on",
       "noPlugins": "No plugins installed",
       "noServers": "No servers configured",
       "empty": "No plugins or servers configured. Add them in Settings.",

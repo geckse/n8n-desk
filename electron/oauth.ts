@@ -16,6 +16,7 @@ interface OAuthServerMetadata {
 
 interface OAuthClientInfo {
   client_id: string
+  client_secret?: string
   client_name: string
   redirect_uris: string[]
   grant_types: string[]
@@ -92,6 +93,7 @@ export async function discoverServer(baseUrl: string): Promise<OAuthServerMetada
 export async function registerClient(
   metadata: OAuthServerMetadata,
   redirectUri: string,
+  options?: { authMethod?: string },
 ): Promise<OAuthClientInfo> {
   const response = await fetch(metadata.registration_endpoint, {
     method: 'POST',
@@ -100,7 +102,7 @@ export async function registerClient(
       client_name: 'n8n-desk',
       redirect_uris: [redirectUri],
       grant_types: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_method: 'none',
+      token_endpoint_auth_method: options?.authMethod ?? 'none',
     }),
     signal: AbortSignal.timeout(10000),
   })
@@ -122,6 +124,7 @@ export function buildAuthorizationUrl(
   redirectUri: string,
   state: string,
   codeVerifier: string,
+  options?: { requestAllScopes?: boolean },
 ): string {
   const codeChallenge = generateCodeChallenge(codeVerifier)
 
@@ -134,8 +137,9 @@ export function buildAuthorizationUrl(
     code_challenge_method: 'S256',
   })
 
-  // Request all supported scopes
-  if (metadata.scopes_supported && metadata.scopes_supported.length > 0) {
+  // Only request all scopes when explicitly asked (e.g., n8n's own MCP server).
+  // For third-party servers, omitting scope lets the server grant its defaults.
+  if (options?.requestAllScopes && metadata.scopes_supported && metadata.scopes_supported.length > 0) {
     params.set('scope', metadata.scopes_supported.join(' '))
   }
 
@@ -151,6 +155,7 @@ export async function exchangeCodeForTokens(
   code: string,
   redirectUri: string,
   codeVerifier: string,
+  clientSecret?: string,
 ): Promise<OAuthTokenResponse> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
@@ -159,6 +164,9 @@ export async function exchangeCodeForTokens(
     client_id: clientId,
     code_verifier: codeVerifier,
   })
+  if (clientSecret) {
+    body.set('client_secret', clientSecret)
+  }
 
   const response = await fetch(metadata.token_endpoint, {
     method: 'POST',
@@ -183,12 +191,16 @@ export async function refreshTokens(
   metadata: OAuthServerMetadata,
   clientId: string,
   refreshToken: string,
+  clientSecret?: string,
 ): Promise<OAuthTokenResponse> {
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
     client_id: clientId,
   })
+  if (clientSecret) {
+    body.set('client_secret', clientSecret)
+  }
 
   const response = await fetch(metadata.token_endpoint, {
     method: 'POST',

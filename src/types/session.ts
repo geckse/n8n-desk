@@ -18,7 +18,7 @@ export interface ChatSessionMeta extends SessionMeta {
 
 export interface SessionMessage {
   id: string
-  role: 'user' | 'assistant' | 'tool' | 'system'
+  role: 'user' | 'assistant' | 'tool' | 'system' | 'thinking'
   content: string
   ts: string
   meta?: Record<string, unknown>

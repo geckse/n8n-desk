@@ -9,6 +9,11 @@ export interface AgentStreamTextChunk extends AgentStreamEventBase {
   data: { text: string }
 }
 
+export interface AgentStreamThinking extends AgentStreamEventBase {
+  type: 'thinking'
+  data: { text: string }
+}
+
 export interface AgentStreamToolCallStart extends AgentStreamEventBase {
   type: 'tool_call_start'
   data: { id: string; name: string; args: Record<string, unknown> }
@@ -55,6 +60,7 @@ export interface AgentStreamWorkflowPreview extends AgentStreamEventBase {
 
 export type AgentStreamEvent =
   | AgentStreamTextChunk
+  | AgentStreamThinking
   | AgentStreamToolCallStart
   | AgentStreamToolCallResult
   | AgentStreamApprovalRequired
@@ -91,7 +97,15 @@ export interface LoadedSkill {
   userInvocable: boolean
   allowedTools?: string[]
   directory: string
-  source: 'user' | string
+  source: 'user' | 'built-in' | string
+  builtIn?: boolean
+}
+
+// --- Conversation History Message ---
+
+export interface ConversationMessage {
+  role: 'user' | 'assistant' | 'tool'
+  content: string
 }
 
 // --- Agent Runner Configuration ---
@@ -102,6 +116,8 @@ export interface AgentRunnerConfig {
   llmConfig: LlmProviderConfig
   systemPrompt: string
   interruptOnTools?: string[]
+  /** Previous conversation messages for multi-turn memory */
+  conversationHistory?: ConversationMessage[]
   /** Custom MCP servers from plugins and standalone servers, keyed by server name */
   customMcpServers?: Record<string, CustomMcpServerConfig>
   /** Pre-built LangChain tools from PluginManager.buildDeepAgentsTools() */

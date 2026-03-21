@@ -15,6 +15,8 @@ export function useWorkflowAgent() {
   let removeEventListener: (() => void) | null = null
 
   function handleEvent(event: AgentEvent): void {
+    // Only process events for the active session
+    if (event.sessionId !== sessionStore.activeSessionId) return
     sessionStore.handleAgentEvent(event)
   }
 

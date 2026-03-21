@@ -12,12 +12,24 @@ const execFileAsync = promisify(execFile)
 
 // --- Types (mirrored from src/types/plugin.ts for electron main process isolation) ---
 
+type ServerAuthType = 'static-headers' | 'oauth'
+
+interface ServerOAuthStatus {
+  connected: boolean
+  expiresAt?: string
+  scope?: string
+}
+
 interface StandaloneMcpServer {
   id: string
   name: string
   description?: string
   url: string
+  authType?: ServerAuthType
   headerNames?: string[]
+  oauthClientId?: string
+  oauthDiscoveryUrl?: string
+  oauthStatus?: ServerOAuthStatus
   enabled: boolean
   requireApproval: boolean
   addedAt: string
@@ -657,11 +669,16 @@ class PluginManager {
     const servers = await this.getStandaloneServers(instanceId)
     const server = servers.find((s) => s.id === id)
 
-    // Delete keychain secrets for all headers
+    // Delete keychain secrets for static headers
     if (server?.headerNames) {
       for (const headerName of server.headerNames) {
         await deleteSecret(`n8n-desk:server:${id}:${headerName}`)
       }
+    }
+
+    // Delete OAuth data if present
+    if (server?.authType === 'oauth') {
+      await this.deleteServerOAuthData(id)
     }
 
     const filtered = servers.filter((s) => s.id !== id)
@@ -735,6 +752,116 @@ class PluginManager {
     }
   }
 
+  // --- OAuth Token Storage (per-server) ---
+
+  /** Store OAuth tokens for a custom MCP server in the OS keychain. */
+  async storeServerOAuthTokens(
+    serverId: string,
+    accessToken: string,
+    refreshToken: string,
+  ): Promise<void> {
+    await writeSecret(`n8n-desk:server-oauth:${serverId}:access_token`, accessToken)
+    await writeSecret(`n8n-desk:server-oauth:${serverId}:refresh_token`, refreshToken)
+  }
+
+  /** Read OAuth tokens for a custom MCP server from the OS keychain. */
+  async readServerOAuthTokens(
+    serverId: string,
+  ): Promise<{ access_token: string; refresh_token: string } | null> {
+    const accessToken = await readSecret(`n8n-desk:server-oauth:${serverId}:access_token`)
+    const refreshToken = await readSecret(`n8n-desk:server-oauth:${serverId}:refresh_token`)
+    if (!accessToken || !refreshToken) return null
+    return { access_token: accessToken, refresh_token: refreshToken }
+  }
+
+  /** Store OAuth server metadata (discovery response) in the keychain. */
+  async storeServerOAuthMetadata(serverId: string, metadata: unknown): Promise<void> {
+    await writeSecret(`n8n-desk:server-oauth:${serverId}:metadata`, JSON.stringify(metadata))
+  }
+
+  /** Read OAuth server metadata from the keychain. */
+  async readServerOAuthMetadata(serverId: string): Promise<Record<string, unknown> | null> {
+    const raw = await readSecret(`n8n-desk:server-oauth:${serverId}:metadata`)
+    if (!raw) return null
+    try { return JSON.parse(raw) as Record<string, unknown> }
+    catch { return null }
+  }
+
+  /** Store OAuth client secret in the keychain. */
+  async storeServerOAuthClientSecret(serverId: string, secret: string): Promise<void> {
+    await writeSecret(`n8n-desk:server-oauth:${serverId}:client_secret`, secret)
+  }
+
+  /** Read OAuth client secret from the keychain. */
+  async readServerOAuthClientSecret(serverId: string): Promise<string | null> {
+    return readSecret(`n8n-desk:server-oauth:${serverId}:client_secret`)
+  }
+
+  /** Delete all OAuth data for a server (tokens + metadata + secret). */
+  async deleteServerOAuthData(serverId: string): Promise<void> {
+    await deleteSecret(`n8n-desk:server-oauth:${serverId}:access_token`)
+    await deleteSecret(`n8n-desk:server-oauth:${serverId}:refresh_token`)
+    await deleteSecret(`n8n-desk:server-oauth:${serverId}:metadata`)
+    await deleteSecret(`n8n-desk:server-oauth:${serverId}:client_secret`)
+  }
+
+  /**
+   * Proactively refresh an OAuth token if it's near expiry.
+   * Silent: logs errors but doesn't throw.
+   */
+  async refreshServerOAuthTokensQuiet(
+    serverId: string,
+    instanceId: string,
+  ): Promise<void> {
+    try {
+      const tokens = await this.readServerOAuthTokens(serverId)
+      const metadata = await this.readServerOAuthMetadata(serverId)
+      if (!tokens || !metadata) return
+
+      const servers = await this.getStandaloneServers(instanceId)
+      const server = servers.find((s) => s.id === serverId)
+      if (!server?.oauthClientId) return
+
+      const tokenEndpoint = metadata.token_endpoint as string | undefined
+      if (!tokenEndpoint) return
+
+      // Import refreshTokens dynamically to avoid circular deps
+      const { refreshTokens } = await import('./oauth')
+      const clientSecret = await this.readServerOAuthClientSecret(serverId)
+      const result = await refreshTokens(
+        metadata as Parameters<typeof refreshTokens>[0],
+        server.oauthClientId,
+        tokens.refresh_token,
+        clientSecret ?? undefined,
+      )
+
+      await this.storeServerOAuthTokens(serverId, result.access_token, result.refresh_token)
+
+      // Update expiry in server record
+      const expiresAt = new Date(Date.now() + result.expires_in * 1000).toISOString()
+      await this.updateStandaloneServer(instanceId, serverId, {
+        oauthStatus: { connected: true, expiresAt, scope: result.scope },
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[n8n-desk] Failed to refresh OAuth token for server ${serverId}: ${msg}`)
+      // Mark as disconnected so the UI can notify the user
+      try {
+        await this.updateStandaloneServer(instanceId, serverId, {
+          oauthStatus: { connected: false },
+        })
+      } catch { /* best-effort */ }
+    }
+  }
+
+  /** Public wrapper for resolveServerHeaders — used by IPC test-by-id handler. */
+  async resolveServerHeadersPublic(
+    serverId: string,
+    headerNames: string[],
+  ): Promise<Record<string, string>> {
+    return this.resolveServerHeaders(serverId, headerNames)
+  }
+
   // --- Backend Builders ---
 
   /**
@@ -805,9 +932,27 @@ class PluginManager {
     for (const server of servers) {
       if (!server.enabled) continue
 
-      const headers = server.headerNames
-        ? await this.resolveServerHeaders(server.id, server.headerNames)
-        : {}
+      let headers: Record<string, string> = {}
+      const authType = server.authType ?? 'static-headers'
+
+      if (authType === 'oauth') {
+        // Proactive refresh: if token expires within 5 minutes, refresh now
+        if (server.oauthStatus?.expiresAt) {
+          const expiresAt = new Date(server.oauthStatus.expiresAt).getTime()
+          if (expiresAt - Date.now() < 5 * 60 * 1000) {
+            await this.refreshServerOAuthTokensQuiet(server.id, instanceId)
+          }
+        }
+        const tokens = await this.readServerOAuthTokens(server.id)
+        if (tokens) {
+          headers = { Authorization: `Bearer ${tokens.access_token}` }
+        }
+      } else {
+        // Static headers path (existing behavior)
+        headers = server.headerNames
+          ? await this.resolveServerHeaders(server.id, server.headerNames)
+          : {}
+      }
 
       // Deduplicate server names with suffix
       let name = server.name

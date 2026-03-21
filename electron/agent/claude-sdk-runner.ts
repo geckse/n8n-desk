@@ -167,8 +167,17 @@ export class ClaudeSdkRunner implements AgentRunner {
     }
 
     try {
+      // Build the prompt: if we have conversation history, format it as context
+      let fullPrompt = message
+      if (config.conversationHistory && config.conversationHistory.length > 0) {
+        const historyBlock = config.conversationHistory
+          .map((m) => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+          .join('\n\n')
+        fullPrompt = `<conversation_history>\n${historyBlock}\n</conversation_history>\n\nHuman: ${message}`
+      }
+
       const queryInstance = queryFn({
-        prompt: message,
+        prompt: fullPrompt,
         options: {
           model: config.llmConfig.model,
           systemPrompt: config.systemPrompt,
@@ -280,15 +289,39 @@ export class ClaudeSdkRunner implements AgentRunner {
   ): AgentStreamEvent[] {
     const events: AgentStreamEvent[] = []
 
-    console.log('[n8n-desk SDK msg]', msg.type, msg.type === 'user' ? JSON.stringify({ parent_tool_use_id: (msg as Record<string, unknown>).parent_tool_use_id, tool_use_result: !!(msg as Record<string, unknown>).tool_use_result, hasMessage: !!(msg as Record<string, unknown>).message }).slice(0, 300) : '')
+    // Debug: log all SDK messages with content summary
+    const msgAny = msg as Record<string, unknown>
+    const debugInfo: Record<string, unknown> = { type: msg.type }
+    if (msg.type === 'assistant' && msgAny.message) {
+      const m = msgAny.message as Record<string, unknown>
+      if (Array.isArray(m.content)) {
+        debugInfo.blocks = (m.content as Array<Record<string, unknown>>).map((b) => b.type)
+      }
+    } else if (msg.type === 'user') {
+      debugInfo.parent_tool_use_id = msgAny.parent_tool_use_id
+      debugInfo.hasResult = msgAny.tool_use_result !== undefined
+    } else if (msg.type === 'tool_progress') {
+      debugInfo.tool = msgAny.tool_name ?? msgAny.name
+      debugInfo.progress = typeof msgAny.data === 'string' ? msgAny.data.slice(0, 100) : undefined
+    } else if (msg.type === 'result') {
+      debugInfo.subtype = msgAny.subtype
+    }
+    console.log('[n8n-desk SDK msg]', JSON.stringify(debugInfo))
 
     switch (msg.type) {
       case 'assistant': {
-        // BetaMessage contains content blocks
+        // BetaMessage contains content blocks (text + tool_use).
+        // Extract both: text blocks as text_chunk events, tool_use blocks as tool_call_start.
         const message = msg.message
         if (message?.content) {
           for (const block of message.content) {
-            if (block.type === 'text') {
+            if (block.type === 'thinking' && (block as Record<string, unknown>).thinking) {
+              events.push({
+                type: 'thinking',
+                sessionId,
+                data: { text: (block as Record<string, unknown>).thinking as string },
+              })
+            } else if (block.type === 'text' && block.text) {
               events.push({
                 type: 'text_chunk',
                 sessionId,
@@ -393,15 +426,36 @@ export class ClaudeSdkRunner implements AgentRunner {
             },
           })
         } else if (resultContent !== undefined) {
-          // Tool result without a matching tool_use_id — still emit with a generated id
-          // so the UI at least shows something
-          console.log('[n8n-desk] Tool result without tool_use_id, content:', JSON.stringify(resultContent).slice(0, 200))
+          // Tool result without a matching tool_use_id — emit with a generated id
+          const generatedId = randomUUID()
+          const resultStr = typeof resultContent === 'string'
+            ? resultContent
+            : JSON.stringify(resultContent ?? '')
+          events.push({
+            type: 'tool_call_result',
+            sessionId,
+            data: {
+              id: generatedId,
+              name: 'tool',
+              result: resultStr,
+              success: true,
+            },
+          })
         }
         break
       }
 
       case 'tool_progress': {
-        // Tool is still executing — no event needed, spinner is already showing
+        // Tool is still executing — emit progress as text so user sees activity
+        const progressMsg = msg as Record<string, unknown>
+        const progressData = progressMsg.data ?? progressMsg.content ?? progressMsg.output
+        if (progressData && typeof progressData === 'string' && progressData.trim()) {
+          events.push({
+            type: 'text_chunk',
+            sessionId,
+            data: { text: progressData },
+          })
+        }
         break
       }
 
@@ -411,7 +465,8 @@ export class ClaudeSdkRunner implements AgentRunner {
       }
 
       default:
-        // Other message types (auth_status, compact_boundary, etc.) — ignore
+        // Other message types (auth_status, compact_boundary, etc.) — log for debugging
+        console.log('[n8n-desk SDK msg] unhandled type:', msg.type, JSON.stringify(msg).slice(0, 300))
         break
     }
 

@@ -70,8 +70,8 @@ function onSave() {
 <style scoped lang="scss">
 // --- Modal sizing via Ionic CSS custom properties ---
 .settings-modal {
-  --width: min(900px, 90vw);
-  --height: min(640px, 85vh);
+  --width: 90vw;
+  --height: 90vh;
   --border-radius: var(--radius--sm, 12px);
   --background: var(--n8n-desk--surface-bg);
 }

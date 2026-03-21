@@ -9,6 +9,7 @@ import type {
   LoadedSkill,
   DiscoveredTool,
 } from '@/types/plugin'
+import { DEFAULT_SKILLS } from '@/data/default-skills'
 
 export interface ToolSource {
   type: 'plugin' | 'server'
@@ -42,6 +43,8 @@ export const usePluginsStore = defineStore('plugins', () => {
   const standaloneServers = ref<StandaloneMcpServer[]>([])
   const skills = ref<LoadedSkill[]>([])
   const isLoading = ref(false)
+  /** Names of built-in skills the user has explicitly disabled */
+  const disabledBuiltInSkills = ref<Set<string>>(new Set())
 
   // --- Computed ---
   const enabledPlugins = computed(() =>
@@ -50,6 +53,29 @@ export const usePluginsStore = defineStore('plugins', () => {
 
   const enabledServers = computed(() =>
     standaloneServers.value.filter((s) => s.enabled),
+  )
+
+  /** All skills: built-in defaults (with enabled state) + user/plugin skills */
+  const allSkills = computed<LoadedSkill[]>(() => {
+    const builtIn = DEFAULT_SKILLS.map((s) => ({
+      ...s,
+      builtIn: true,
+      _disabled: disabledBuiltInSkills.value.has(s.name),
+    }))
+    return [...builtIn, ...skills.value]
+  })
+
+  /** Only enabled skills (for passing to the agent) */
+  const enabledSkills = computed<LoadedSkill[]>(() =>
+    allSkills.value.filter((s) => !('_disabled' in s && (s as LoadedSkill & { _disabled: boolean })._disabled)),
+  )
+
+  /** Built-in skills (for the Settings UI "Default Skills" group) */
+  const builtInSkills = computed(() =>
+    DEFAULT_SKILLS.map((s) => ({
+      ...s,
+      enabled: !disabledBuiltInSkills.value.has(s.name),
+    })),
   )
 
   const allToolSources = computed<ToolSource[]>(() => {
@@ -201,6 +227,7 @@ export const usePluginsStore = defineStore('plugins', () => {
     name: string
     description?: string
     url: string
+    authType?: 'static-headers' | 'oauth'
     headerNames?: string[]
     enabled: boolean
     requireApproval: boolean
@@ -244,6 +271,16 @@ export const usePluginsStore = defineStore('plugins', () => {
     return result.tools
   }
 
+  /** Test connection using stored credentials (OAuth or static headers from keychain). */
+  async function testServerById(serverId: string): Promise<DiscoveredTool[]> {
+    const bridge = getPluginsBridge()
+    const result = await bridge.serversTestById(serverId)
+    if (isError(result)) {
+      throw new Error(result.error)
+    }
+    return result.tools
+  }
+
   // --- Secret management ---
 
   async function setSecret(
@@ -257,6 +294,71 @@ export const usePluginsStore = defineStore('plugins', () => {
     if (isError(result)) {
       throw new Error(result.error)
     }
+  }
+
+  // --- Server OAuth ---
+
+  async function serverProbeOAuth(serverUrl: string): Promise<boolean> {
+    const bridge = getPluginsBridge()
+    const result = await bridge.serverProbeOAuth(serverUrl)
+    return result?.supportsOAuth === true
+  }
+
+  async function serverOAuthConnect(
+    serverId: string,
+    serverUrl: string,
+    clientId?: string,
+    clientSecret?: string,
+  ): Promise<{ success: boolean; expiresAt?: string; error?: string; needsManualClient?: boolean }> {
+    const bridge = getPluginsBridge()
+    const result = await bridge.serverOAuthConnect({ serverId, serverUrl, clientId, clientSecret })
+    if (result.success) {
+      await hydrateServers()
+    }
+    return result
+  }
+
+  async function serverOAuthDisconnect(serverId: string): Promise<void> {
+    const bridge = getPluginsBridge()
+    const result = await bridge.serverOAuthDisconnect({ serverId })
+    if (isError(result)) {
+      throw new Error(result.error)
+    }
+    await hydrateServers()
+  }
+
+  // --- Built-in skill toggle ---
+
+  async function hydrateDisabledBuiltInSkills(): Promise<void> {
+    try {
+      const raw = await window.n8nDesk?.storage.read('disabled-built-in-skills.json')
+      if (raw) {
+        const parsed = JSON.parse(raw) as string[]
+        disabledBuiltInSkills.value = new Set(parsed)
+      }
+    } catch {
+      // No file yet — all built-in skills enabled by default
+    }
+  }
+
+  async function persistDisabledBuiltInSkills(): Promise<void> {
+    const data = JSON.stringify(Array.from(disabledBuiltInSkills.value))
+    await window.n8nDesk?.storage.write('disabled-built-in-skills.json', data)
+  }
+
+  async function toggleBuiltInSkill(name: string): Promise<void> {
+    if (disabledBuiltInSkills.value.has(name)) {
+      disabledBuiltInSkills.value.delete(name)
+    } else {
+      disabledBuiltInSkills.value.add(name)
+    }
+    // Trigger reactivity
+    disabledBuiltInSkills.value = new Set(disabledBuiltInSkills.value)
+    await persistDisabledBuiltInSkills()
+  }
+
+  function isBuiltInSkillEnabled(name: string): boolean {
+    return !disabledBuiltInSkills.value.has(name)
   }
 
   // --- Skills ---
@@ -298,6 +400,7 @@ export const usePluginsStore = defineStore('plugins', () => {
         hydrateInstalledPlugins(),
         hydrateServers(),
         loadSkills(),
+        hydrateDisabledBuiltInSkills(),
       ])
     } finally {
       isLoading.value = false
@@ -324,6 +427,9 @@ export const usePluginsStore = defineStore('plugins', () => {
     enabledPlugins,
     enabledServers,
     allToolSources,
+    allSkills,
+    enabledSkills,
+    builtInSkills,
 
     // Hydrate / reset
     hydrate,
@@ -348,13 +454,23 @@ export const usePluginsStore = defineStore('plugins', () => {
     updateServer,
     removeServer,
     testServer,
+    testServerById,
 
     // Secret management
     setSecret,
+
+    // Server OAuth
+    serverProbeOAuth,
+    serverOAuthConnect,
+    serverOAuthDisconnect,
 
     // Skills
     loadSkills,
     saveSkill,
     deleteSkill,
+
+    // Built-in skills
+    toggleBuiltInSkill,
+    isBuiltInSkillEnabled,
   }
 })

@@ -9,6 +9,11 @@ export interface AgentTextChunkEvent extends AgentEventBase {
   data: { text: string }
 }
 
+export interface AgentThinkingEvent extends AgentEventBase {
+  type: 'thinking'
+  data: { text: string }
+}
+
 export interface AgentToolCallStartEvent extends AgentEventBase {
   type: 'tool_call_start'
   data: { id: string; name: string; args: Record<string, unknown> }
@@ -55,6 +60,7 @@ export interface AgentWorkflowPreviewEvent extends AgentEventBase {
 
 export type AgentEvent =
   | AgentTextChunkEvent
+  | AgentThinkingEvent
   | AgentToolCallStartEvent
   | AgentToolCallResultEvent
   | AgentApprovalRequiredEvent

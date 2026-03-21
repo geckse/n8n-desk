@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { IonToggle, IonButton } from '@ionic/vue'
-import { Pencil, Trash2, ShieldCheck, Server } from 'lucide-vue-next'
+import { Pencil, Trash2, ShieldCheck, Server, KeyRound } from 'lucide-vue-next'
 import { useI18n } from 'vue-i18n'
 import type { StandaloneMcpServer } from '@/types/plugin'
 
@@ -59,6 +59,13 @@ function handleDelete() {
       <div :class="$style.info">
         <div :class="$style.nameRow">
           <span :class="$style.name">{{ server.name }}</span>
+          <span
+            v-if="(server.authType ?? 'static-headers') === 'oauth'"
+            :class="[$style.oauthBadge, server.oauthStatus?.connected ? $style.oauthBadgeConnected : $style.oauthBadgeDisconnected]"
+          >
+            <KeyRound :size="11" />
+            {{ server.oauthStatus?.connected ? t('plugins.server.oauthConnected') : t('plugins.server.oauthNotConnected') }}
+          </span>
           <span v-if="server.requireApproval" :class="$style.approvalBadge">
             <ShieldCheck :size="12" />
             {{ t('plugins.server.requiresApproval') }}
@@ -151,6 +158,28 @@ function handleDelete() {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.oauthBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.oauthBadgeConnected {
+  color: var(--color--success, #10b981);
+  background: color-mix(in srgb, var(--color--success, #10b981) 12%, transparent);
+}
+
+.oauthBadgeDisconnected {
+  color: var(--color--warning, #f59e0b);
+  background: color-mix(in srgb, var(--color--warning, #f59e0b) 12%, transparent);
 }
 
 .approvalBadge {

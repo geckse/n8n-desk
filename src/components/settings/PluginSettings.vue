@@ -7,7 +7,7 @@ import {
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  Plus, RefreshCw, Trash2, Search, Store, Server,
+  Plus, RefreshCw, Trash2, Search, Store, Server, Lock,
 } from 'lucide-vue-next'
 import PluginCard from '@/components/plugins/PluginCard.vue'
 import McpServerCard from '@/components/plugins/McpServerCard.vue'
@@ -24,15 +24,24 @@ import type {
   LoadedSkill,
 } from '@/types/plugin'
 
+const props = defineProps<{
+  initialTab?: 'installed' | 'discover' | 'marketplaces' | 'skills'
+}>()
+
 const { t } = useI18n()
 const pluginsStore = usePluginsStore()
 
 // --- Tab state ---
-const activeTab = ref<'installed' | 'discover' | 'marketplaces' | 'skills'>('installed')
+const activeTab = ref<'installed' | 'discover' | 'marketplaces' | 'skills'>(props.initialTab ?? 'installed')
 
 function onTabChange(event: CustomEvent) {
   activeTab.value = event.detail.value
 }
+
+// Sync tab when parent changes the initialTab
+watch(() => props.initialTab, (tab) => {
+  if (tab) activeTab.value = tab
+})
 
 // --- Hydrate on mount ---
 const isHydrating = ref(false)
@@ -178,7 +187,7 @@ function handleInstallRequest(entry: MarketplacePluginEntry) {
   installDialogOpen.value = true
 }
 
-function handleInstallComplete(plugin: InstalledPlugin) {
+function handleInstallComplete(_plugin: InstalledPlugin) {
   installDialogOpen.value = false
   installingPluginName.value = null
   // The store already has the plugin added via installPlugin
@@ -279,6 +288,10 @@ function handleSkillCancel() {
   editingSkill.value = undefined
 }
 
+function handleBuiltInSkillToggle(skill: LoadedSkill) {
+  void pluginsStore.toggleBuiltInSkill(skill.name)
+}
+
 function openCreateSkill() {
   editingSkill.value = undefined
   showSkillEditor.value = true
@@ -328,6 +341,33 @@ function openCreateSkill() {
       </template>
 
       <template v-else>
+        <!-- Built-in n8n MCP Server (always on, non-removable) -->
+        <div :class="$style.sectionGroup">
+          <div :class="$style.sectionGroupLabel">
+            {{ t('plugins.settings.installed.builtInTitle') }}
+          </div>
+          <div :class="$style.builtInCard">
+            <div :class="$style.builtInMain">
+              <div :class="$style.builtInIconWrap">
+                <Server :size="16" :class="$style.builtInIcon" />
+              </div>
+              <div :class="$style.builtInInfo">
+                <div :class="$style.builtInName">
+                  n8n MCP
+                  <span :class="$style.builtInBadge">{{ t('plugins.settings.installed.builtInBadge') }}</span>
+                </div>
+                <div :class="$style.builtInMeta">
+                  {{ t('plugins.settings.installed.builtInDescription') }}
+                </div>
+              </div>
+              <div :class="$style.builtInStatus">
+                <Lock :size="12" :class="$style.builtInLockIcon" />
+                <span :class="$style.builtInStatusText">{{ t('plugins.settings.installed.builtInAlwaysOn') }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Installed Plugins -->
         <div :class="$style.sectionGroup">
           <div :class="$style.sectionGroupLabel">
@@ -611,36 +651,58 @@ function openCreateSkill() {
       </template>
 
       <template v-else>
-        <div :class="$style.sectionGroupHeader">
-          <div>
-            <div :class="$style.sectionGroupLabel">
-              {{ t('plugins.settings.skills.title') }}
-            </div>
-            <p :class="$style.sectionDescription">
-              {{ t('plugins.settings.skills.description') }}
-            </p>
+        <!-- Default Skills (built-in, shipped with the app) -->
+        <div :class="$style.sectionGroup">
+          <div :class="$style.sectionGroupLabel">
+            {{ t('plugins.settings.skills.defaultTitle') }}
           </div>
-          <ion-button
-            fill="clear"
-            size="small"
-            @click="openCreateSkill"
-          >
-            <Plus :size="14" style="margin-right: 4px;" />
-            {{ t('plugins.settings.skills.createSkill') }}
-          </ion-button>
+          <p :class="$style.sectionDescription" style="margin-bottom: var(--spacing--sm);">
+            {{ t('plugins.settings.skills.defaultDescription') }}
+          </p>
+          <div :class="$style.cardGrid">
+            <SkillCard
+              v-for="builtIn in pluginsStore.builtInSkills"
+              :key="builtIn.name"
+              :skill="builtIn"
+              :enabled="builtIn.enabled"
+              @toggle="handleBuiltInSkillToggle"
+            />
+          </div>
         </div>
 
-        <div v-if="pluginsStore.skills.length === 0" :class="$style.emptyState">
-          {{ t('plugins.settings.skills.empty') }}
-        </div>
-        <div v-else :class="$style.cardGrid">
-          <SkillCard
-            v-for="skill in pluginsStore.skills"
-            :key="skill.name"
-            :skill="skill"
-            @edit="handleSkillEdit"
-            @delete="handleSkillDelete"
-          />
+        <!-- User / Plugin Skills -->
+        <div :class="$style.sectionGroup">
+          <div :class="$style.sectionGroupHeader">
+            <div>
+              <div :class="$style.sectionGroupLabel">
+                {{ t('plugins.settings.skills.title') }}
+              </div>
+              <p :class="$style.sectionDescription">
+                {{ t('plugins.settings.skills.description') }}
+              </p>
+            </div>
+            <ion-button
+              fill="clear"
+              size="small"
+              @click="openCreateSkill"
+            >
+              <Plus :size="14" style="margin-right: 4px;" />
+              {{ t('plugins.settings.skills.createSkill') }}
+            </ion-button>
+          </div>
+
+          <div v-if="pluginsStore.skills.length === 0" :class="$style.emptyState">
+            {{ t('plugins.settings.skills.empty') }}
+          </div>
+          <div v-else :class="$style.cardGrid">
+            <SkillCard
+              v-for="skill in pluginsStore.skills"
+              :key="skill.name"
+              :skill="skill"
+              @edit="handleSkillEdit"
+              @delete="handleSkillDelete"
+            />
+          </div>
         </div>
       </template>
     </div>
@@ -735,6 +797,90 @@ function openCreateSkill() {
   display: flex;
   flex-direction: column;
   gap: var(--spacing--sm);
+}
+
+// --- Empty State ---
+// --- Built-in n8n MCP Card ---
+.builtInCard {
+  background: var(--n8n-desk--surface-bg, var(--color--foreground));
+  border: 1px solid var(--color--primary, #ff6d5a);
+  border-radius: 10px;
+  padding: 12px 16px;
+  opacity: 0.95;
+}
+
+.builtInMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.builtInIconWrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color--primary, #ff6d5a) 15%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.builtInIcon {
+  color: var(--color--primary, #ff6d5a);
+}
+
+.builtInInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.builtInName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color--text--shade-1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.builtInBadge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color--primary, #ff6d5a);
+  background: color-mix(in srgb, var(--color--primary, #ff6d5a) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.builtInMeta {
+  font-size: 12px;
+  color: var(--color--text--tint-1);
+  margin-top: 2px;
+}
+
+.builtInStatus {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color--success, #10b981) 10%, transparent);
+}
+
+.builtInLockIcon {
+  color: var(--color--success, #10b981);
+}
+
+.builtInStatusText {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color--success, #10b981);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 // --- Empty State ---

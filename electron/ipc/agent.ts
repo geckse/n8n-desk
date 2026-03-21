@@ -222,6 +222,87 @@ function extractWorkflowFromResult(result: unknown): { workflowId: string; name:
   return null
 }
 
+/**
+ * Read session JSONL and build conversation history for multi-turn memory.
+ * Returns messages in chronological order, combining text chunks into
+ * complete assistant messages.
+ */
+async function loadConversationHistory(
+  sessionId: string,
+): Promise<import('./types').ConversationMessage[]> {
+  const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
+  if (!config?.defaultInstanceId) return []
+
+  const jsonlPath = path.join(
+    BASE_DIR,
+    'instances',
+    config.defaultInstanceId,
+    'sessions',
+    'workflow',
+    `${sessionId}.jsonl`,
+  )
+
+  try {
+    const content = await fs.readFile(jsonlPath, 'utf-8')
+    const lines = content.trim().split('\n').filter(Boolean)
+    const history: import('./types').ConversationMessage[] = []
+
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line) as { role?: string; content?: string }
+        if (!msg.role || !msg.content) continue
+
+        if (msg.role === 'user') {
+          history.push({ role: 'user', content: msg.content })
+        } else if (msg.role === 'assistant' && msg.content) {
+          history.push({ role: 'assistant', content: msg.content })
+        }
+        // Skip tool messages — the agent sees tool results via MCP, not via history
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    return history
+  } catch {
+    return [] // File doesn't exist yet (first message in session)
+  }
+}
+
+/** Accumulates text chunks per session so we can flush a complete assistant message */
+const sessionTextAccumulator = new Map<string, string>()
+
+/** Flush the accumulated assistant text to JSONL and clear the buffer */
+async function flushAssistantMessage(sessionId: string): Promise<void> {
+  const text = sessionTextAccumulator.get(sessionId)
+  sessionTextAccumulator.delete(sessionId)
+  if (!text?.trim()) return
+
+  const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
+  if (!config?.defaultInstanceId) return
+
+  const jsonlPath = path.join(
+    BASE_DIR,
+    'instances',
+    config.defaultInstanceId,
+    'sessions',
+    'workflow',
+    `${sessionId}.jsonl`,
+  )
+
+  const message = {
+    id: `msg_${Date.now()}`,
+    role: 'assistant',
+    content: text,
+    ts: new Date().toISOString(),
+  }
+
+  try {
+    await fs.mkdir(path.dirname(jsonlPath), { recursive: true })
+    await fs.appendFile(jsonlPath, JSON.stringify(message) + '\n', 'utf-8')
+  } catch { /* non-fatal */ }
+}
+
 async function appendToSessionJsonl(sessionId: string, event: AgentStreamEvent): Promise<void> {
   // Find the active instance to determine the JSONL path
   const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
@@ -240,10 +321,19 @@ async function appendToSessionJsonl(sessionId: string, event: AgentStreamEvent):
   let message: Record<string, unknown> | null = null
 
   switch (event.type) {
-    case 'text_chunk':
-      // Text chunks are accumulated in the renderer; we persist the final message on 'done'
+    case 'text_chunk': {
+      // Accumulate text chunks — flushed as a complete assistant message on 'done'
+      const prev = sessionTextAccumulator.get(sessionId) ?? ''
+      sessionTextAccumulator.set(sessionId, prev + event.data.text)
+      break
+    }
+    case 'done':
+      // Flush accumulated assistant text before the session ends
+      await flushAssistantMessage(sessionId)
       break
     case 'tool_call_start':
+      // Flush any accumulated assistant text before the tool call
+      await flushAssistantMessage(sessionId)
       message = {
         id: `msg_${Date.now()}`,
         role: 'tool',
@@ -439,6 +529,10 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         ...approvalToolNames,
       ]
 
+      // Load conversation history for multi-turn memory
+      const conversationHistory = await loadConversationHistory(sessionId)
+      console.log(`[n8n-desk] Loaded ${conversationHistory.length} messages from session history`)
+
       const runnerConfig: AgentRunnerConfig = {
         instanceUrl: instanceConfig.url,
         accessToken: instanceConfig.accessToken,
@@ -448,7 +542,10 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         customMcpServers,
         customTools,
         skills: autoInvocableSkills,
+        conversationHistory,
       }
+
+      console.log('[n8n-desk] System prompt:\n', augmentedPrompt)
 
       // Run agent and stream events
       // Use an async IIFE so we don't block the IPC return

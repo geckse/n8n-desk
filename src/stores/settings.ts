@@ -23,6 +23,21 @@ export const useSettingsStore = defineStore('settings', () => {
 
   const hasLlmConfig = computed(() => llmConfig.value !== null)
 
+  // --- Settings modal state (global so any component can open it) ---
+  const settingsOpen = ref(false)
+  const settingsSection = ref<string | null>(null)
+
+  /** Open the settings modal, optionally jumping to a specific section */
+  function openSettings(section?: string): void {
+    settingsSection.value = section ?? null
+    settingsOpen.value = true
+  }
+
+  function closeSettings(): void {
+    settingsOpen.value = false
+    settingsSection.value = null
+  }
+
   async function hydrate(): Promise<void> {
     const saved = await localStorageService.readJson<AppSettings>(CONFIG_PATH)
     if (saved) {
@@ -84,5 +99,9 @@ export const useSettingsStore = defineStore('settings', () => {
     setLocale,
     hydrateLlm,
     saveLlm,
+    settingsOpen,
+    settingsSection,
+    openSettings,
+    closeSettings,
   }
 })

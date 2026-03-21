@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { IonCard, IonCardContent, IonButton } from '@ionic/vue'
-import { Pencil, Trash2, Zap, Hand, Terminal } from 'lucide-vue-next'
+import { IonCard, IonCardContent, IonButton, IonToggle } from '@ionic/vue'
+import { Pencil, Trash2, Zap, Hand, Terminal, ShieldAlert, Eye } from 'lucide-vue-next'
 import { useI18n } from 'vue-i18n'
 import type { LoadedSkill } from '@/types/plugin'
 
 interface Props {
   skill: LoadedSkill
+  /** For built-in skills: whether the skill is currently enabled */
+  enabled?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  enabled: true,
+})
 
 const emit = defineEmits<{
   edit: [skill: LoadedSkill]
   delete: [skill: LoadedSkill]
+  toggle: [skill: LoadedSkill]
+  view: [skill: LoadedSkill]
 }>()
 
 const { t } = useI18n()
 
 const isUserCreated = computed(() => props.skill.source === 'user')
+const isBuiltIn = computed(() => props.skill.builtIn === true)
 
 const slashCommand = computed(() => `/${props.skill.name}`)
 
@@ -32,11 +39,11 @@ const invocationLabel = computed(() =>
     : t('plugins.skill.manual'),
 )
 
-const sourceLabel = computed(() =>
-  isUserCreated.value
-    ? t('plugins.skill.sourceUser')
-    : props.skill.source,
-)
+const sourceLabel = computed(() => {
+  if (isBuiltIn.value) return t('plugins.skill.sourceBuiltIn')
+  if (isUserCreated.value) return t('plugins.skill.sourceUser')
+  return props.skill.source
+})
 
 const initial = computed(() => {
   const n = props.skill.name
@@ -50,10 +57,14 @@ function handleEdit() {
 function handleDelete() {
   emit('delete', props.skill)
 }
+
+function handleToggle() {
+  emit('toggle', props.skill)
+}
 </script>
 
 <template>
-  <ion-card :class="$style.card">
+  <ion-card :class="[$style.card, isBuiltIn && !enabled && $style.cardDisabled]">
     <ion-card-content :class="$style.content">
       <div :class="$style.header">
         <div :class="$style.iconWrap">
@@ -69,7 +80,7 @@ function handleDelete() {
           </span>
         </div>
         <div :class="$style.badges">
-          <span :class="$style.sourceBadge">{{ sourceLabel }}</span>
+          <span :class="[$style.sourceBadge, isBuiltIn && $style.sourceBadgeBuiltIn]">{{ sourceLabel }}</span>
           <span
             :class="[
               $style.modeBadge,
@@ -89,7 +100,33 @@ function handleDelete() {
         {{ skill.description }}
       </p>
 
-      <div v-if="isUserCreated" :class="$style.actions">
+      <!-- Warning when a built-in skill is disabled -->
+      <div v-if="isBuiltIn && !enabled" :class="$style.disabledWarning">
+        <ShieldAlert :size="14" :class="$style.warningIcon" />
+        <span>{{ t('plugins.skill.builtInDisabledWarning') }}</span>
+      </div>
+
+      <!-- Built-in skills: view + toggle (no edit/delete) -->
+      <div v-if="isBuiltIn" :class="$style.actions">
+        <ion-button
+          fill="clear"
+          size="small"
+          :class="$style.actionBtn"
+          @click="emit('view', skill)"
+        >
+          <Eye :size="14" />
+          {{ t('plugins.skill.view') }}
+        </ion-button>
+        <div :class="$style.actionsSpacer" />
+        <ion-toggle
+          :checked="enabled"
+          :class="$style.builtInToggle"
+          @ion-change="handleToggle"
+        />
+      </div>
+
+      <!-- User skills: edit/delete -->
+      <div v-else-if="isUserCreated" :class="$style.actions">
         <ion-button
           fill="clear"
           size="small"
@@ -202,6 +239,10 @@ function handleDelete() {
   flex-shrink: 0;
 }
 
+.cardDisabled {
+  opacity: 0.6;
+}
+
 .sourceBadge {
   display: inline-flex;
   align-items: center;
@@ -212,6 +253,11 @@ function handleDelete() {
   color: var(--color--primary, #ff6d5a);
   background: var(--n8n-desk--surface-raised-bg, var(--color--foreground--tint-2));
   white-space: nowrap;
+}
+
+.sourceBadgeBuiltIn {
+  color: var(--color--primary, #ff6d5a);
+  background: color-mix(in srgb, var(--color--primary, #ff6d5a) 12%, transparent);
 }
 
 .modeBadge {
@@ -247,6 +293,31 @@ function handleDelete() {
   align-items: center;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.disabledWarning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color--warning, #f59e0b) 10%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color--warning, #f59e0b);
+}
+
+.warningIcon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.actionsSpacer { flex: 1; }
+
+.builtInToggle {
+  --track-background: var(--color--text--tint-2);
+  --track-background-checked: var(--color--success, #10b981);
 }
 
 .actionBtn {

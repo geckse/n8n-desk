@@ -174,9 +174,18 @@ export class DeepAgentsRunner implements AgentRunner {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any)
 
+      // Build input: include conversation history for cold starts (app restart)
+      let input = message
+      if (config.conversationHistory && config.conversationHistory.length > 0) {
+        const historyBlock = config.conversationHistory
+          .map((m) => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+          .join('\n\n')
+        input = `<conversation_history>\n${historyBlock}\n</conversation_history>\n\nHuman: ${message}`
+      }
+
       // Stream agent events
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const stream = await (agent.stream as any)(message, {
+      const stream = await (agent.stream as any)(input, {
         configurable: { thread_id: sessionId },
         signal: abortController.signal,
       })
@@ -310,12 +319,38 @@ export class DeepAgentsRunner implements AgentRunner {
       // Streaming text chunk from the LLM
       const chunk = event.data as Record<string, unknown> | undefined
       const content = chunk?.chunk as Record<string, unknown> | undefined
-      if (content?.content && typeof content.content === 'string') {
-        events.push({
-          type: 'text_chunk',
-          sessionId,
-          data: { text: content.content },
-        })
+      if (content?.content) {
+        // content.content can be a string (OpenAI/Ollama) or an array of content blocks (Anthropic)
+        let text = ''
+        let thinking = ''
+        if (typeof content.content === 'string') {
+          text = content.content
+        } else if (Array.isArray(content.content)) {
+          for (const block of content.content) {
+            if (block && typeof block === 'object') {
+              const b = block as Record<string, unknown>
+              if (b.type === 'thinking' && typeof b.thinking === 'string') {
+                thinking += b.thinking
+              } else if (b.type === 'text' && typeof b.text === 'string') {
+                text += b.text
+              }
+            }
+          }
+        }
+        if (thinking) {
+          events.push({
+            type: 'thinking',
+            sessionId,
+            data: { text: thinking },
+          })
+        }
+        if (text) {
+          events.push({
+            type: 'text_chunk',
+            sessionId,
+            data: { text },
+          })
+        }
       }
     } else if (eventType === 'on_tool_start') {
       // Tool execution starting

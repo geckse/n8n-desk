@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import {
   IonInput, IonTextarea, IonToggle, IonButton, IonSpinner,
+  IonSegment, IonSegmentButton, IonLabel,
 } from '@ionic/vue'
-import { ref, reactive, computed } from 'vue'
-import { Plus, Minus, Server, CheckCircle2 } from 'lucide-vue-next'
+import { ref, reactive, computed, watch } from 'vue'
+import { Plus, Minus, Server, CheckCircle2, LogIn, LogOut, AlertCircle } from 'lucide-vue-next'
 import { useI18n } from 'vue-i18n'
 import { usePluginsStore } from '@/stores/plugins'
-import type { StandaloneMcpServer } from '@/types/plugin'
+import type { StandaloneMcpServer, ServerAuthType } from '@/types/plugin'
 
 interface Props {
   /** Pre-fill the form for editing an existing server */
@@ -35,6 +36,7 @@ const draft = reactive({
   url: props.editServer?.url ?? '',
   description: props.editServer?.description ?? '',
   requireApproval: props.editServer?.requireApproval ?? true,
+  authType: (props.editServer?.authType ?? 'static-headers') as ServerAuthType,
 })
 
 const headers = ref<HeaderRow[]>(
@@ -42,6 +44,100 @@ const headers = ref<HeaderRow[]>(
     ? props.editServer.headerNames.map((name) => ({ name, value: '' }))
     : [],
 )
+
+// --- OAuth state ---
+const oauthStatus = ref<'idle' | 'connecting' | 'connected' | 'error'>(
+  props.editServer?.oauthStatus?.connected ? 'connected' : 'idle',
+)
+const oauthExpiresAt = ref(props.editServer?.oauthStatus?.expiresAt ?? '')
+const oauthError = ref('')
+const oauthProbed = ref(false)
+const oauthClientId = ref('')
+const oauthClientSecret = ref('')
+
+// Probe for OAuth support when URL changes (debounced)
+let probeTimer: ReturnType<typeof setTimeout> | null = null
+watch(() => draft.url, (url) => {
+  oauthProbed.value = false
+  if (probeTimer) clearTimeout(probeTimer)
+  if (!url || !isValidUrl(url.trim())) return
+  probeTimer = setTimeout(async () => {
+    try {
+      const supports = await pluginsStore.serverProbeOAuth(url.trim())
+      oauthProbed.value = supports
+      // Auto-select OAuth for new servers if supported
+      if (supports && !props.editServer) {
+        draft.authType = 'oauth'
+      }
+    } catch {
+      oauthProbed.value = false
+    }
+  }, 500)
+})
+
+async function connectOAuth(): Promise<void> {
+  oauthStatus.value = 'connecting'
+  oauthError.value = ''
+
+  // For new servers, save first to get an ID
+  let serverId = props.editServer?.id
+  let isNewlyCreated = false
+  if (!serverId) {
+    try {
+      const server = await pluginsStore.addServer({
+        name: draft.name.trim() || draft.url.trim(),
+        url: draft.url.trim(),
+        description: draft.description.trim() || undefined,
+        authType: 'oauth',
+        enabled: false, // disabled until OAuth completes
+        requireApproval: draft.requireApproval,
+      })
+      serverId = server.id
+      isNewlyCreated = true
+    } catch (err) {
+      oauthStatus.value = 'error'
+      oauthError.value = err instanceof Error ? err.message : 'Failed to save server'
+      return
+    }
+  }
+
+  const result = await pluginsStore.serverOAuthConnect(
+    serverId,
+    draft.url.trim(),
+    oauthClientId.value.trim() || undefined,
+    oauthClientSecret.value.trim() || undefined,
+  )
+  if (result.success) {
+    oauthStatus.value = 'connected'
+    oauthExpiresAt.value = result.expiresAt ?? ''
+    // Enable the server now that OAuth is connected
+    if (isNewlyCreated) {
+      await pluginsStore.updateServer(serverId, { enabled: true })
+    }
+  } else if (result.needsManualClient) {
+    oauthStatus.value = 'error'
+    oauthError.value = t('plugins.addServer.oauthNeedsClientId')
+  } else {
+    oauthStatus.value = 'error'
+    oauthError.value = result.error ?? t('plugins.addServer.oauthError')
+  }
+}
+
+async function disconnectOAuth(): Promise<void> {
+  const serverId = props.editServer?.id
+  if (!serverId) return
+  try {
+    await pluginsStore.serverOAuthDisconnect(serverId)
+    oauthStatus.value = 'idle'
+    oauthExpiresAt.value = ''
+  } catch {
+    // best-effort
+  }
+}
+
+function onAuthTypeChange(event: CustomEvent) {
+  draft.authType = event.detail.value
+}
 
 // --- Validation ---
 
@@ -110,10 +206,19 @@ async function testConnection(): Promise<void> {
   discoveredToolCount.value = 0
 
   try {
-    const tools = await pluginsStore.testServer(
-      draft.url.trim(),
-      buildHeadersRecord(),
-    )
+    let tools: import('@/types/plugin').DiscoveredTool[]
+
+    // For OAuth servers with a saved ID, use stored credentials
+    const serverId = props.editServer?.id
+    if (draft.authType === 'oauth' && serverId && oauthStatus.value === 'connected') {
+      tools = await pluginsStore.testServerById(serverId)
+    } else {
+      tools = await pluginsStore.testServer(
+        draft.url.trim(),
+        buildHeadersRecord(),
+      )
+    }
+
     discoveredToolCount.value = tools.length
     testStatus.value = 'success'
   } catch (err: unknown) {
@@ -135,44 +240,74 @@ async function handleSave(): Promise<void> {
   isSaving.value = true
 
   try {
-    const headerNames = headers.value
+    const isOAuth = draft.authType === 'oauth'
+    const headerNames = isOAuth ? [] : headers.value
       .map((h) => h.name.trim())
       .filter((n) => n.length > 0)
 
     if (props.editServer) {
+      const switchedAwayFromOAuth = !isOAuth && (props.editServer.authType ?? 'static-headers') === 'oauth'
+
       // Update existing server
       await pluginsStore.updateServer(props.editServer.id, {
         name: draft.name.trim() || draft.url.trim(),
         url: draft.url.trim(),
         description: draft.description.trim() || undefined,
-        headerNames: headerNames.length > 0 ? headerNames : undefined,
+        authType: draft.authType,
+        headerNames: !isOAuth && headerNames.length > 0 ? headerNames : undefined,
         requireApproval: draft.requireApproval,
+        // Clear OAuth fields when switching away from OAuth
+        ...(switchedAwayFromOAuth ? { oauthClientId: undefined, oauthDiscoveryUrl: undefined, oauthStatus: undefined } : {}),
       })
+
+      // Clean up OAuth tokens if switching away from OAuth
+      if (switchedAwayFromOAuth) {
+        await pluginsStore.serverOAuthDisconnect(props.editServer.id)
+      }
+
+      // Store any header values that were (re-)entered (static headers only)
+      if (!isOAuth) {
+        for (const row of headers.value) {
+          const name = row.name.trim()
+          const value = row.value.trim()
+          if (name && value) {
+            await pluginsStore.setSecret('server', props.editServer.id, name, value)
+          }
+        }
+      }
+
       emit('saved', {
         ...props.editServer,
         name: draft.name.trim() || draft.url.trim(),
         url: draft.url.trim(),
         description: draft.description.trim(),
-        headerNames,
+        authType: draft.authType,
+        headerNames: isOAuth ? undefined : headerNames,
         requireApproval: draft.requireApproval,
       })
+    } else if (isOAuth && oauthStatus.value === 'connected') {
+      // OAuth server already saved + connected during the connect flow
+      emit('saved', {} as StandaloneMcpServer)
     } else {
-      // Add new server
+      // Add new server (static headers)
       const server = await pluginsStore.addServer({
         name: draft.name.trim() || draft.url.trim(),
         url: draft.url.trim(),
         description: draft.description.trim() || undefined,
-        headerNames: headerNames.length > 0 ? headerNames : undefined,
+        authType: draft.authType,
+        headerNames: !isOAuth && headerNames.length > 0 ? headerNames : undefined,
         enabled: true,
         requireApproval: draft.requireApproval,
       })
 
-      // Store header secret values in keychain
-      for (const row of headers.value) {
-        const name = row.name.trim()
-        const value = row.value.trim()
-        if (name && value) {
-          await pluginsStore.setSecret('server', server.id, name, value)
+      // Store header secret values in keychain (static headers only)
+      if (!isOAuth) {
+        for (const row of headers.value) {
+          const name = row.name.trim()
+          const value = row.value.trim()
+          if (name && value) {
+            await pluginsStore.setSecret('server', server.id, name, value)
+          }
         }
       }
 
@@ -240,8 +375,105 @@ const isEditing = computed(() => !!props.editServer)
       />
     </div>
 
-    <!-- Headers -->
+    <!-- Auth Type Selector -->
     <div :class="$style.field">
+      <label :class="$style.fieldLabel">{{ t('plugins.addServer.authType') }}</label>
+      <ion-segment
+        :value="draft.authType"
+        mode="ios"
+        @ion-change="onAuthTypeChange"
+      >
+        <ion-segment-button value="static-headers">
+          <ion-label>{{ t('plugins.addServer.authTypeStaticHeaders') }}</ion-label>
+        </ion-segment-button>
+        <ion-segment-button value="oauth">
+          <ion-label>{{ t('plugins.addServer.authTypeOAuth') }}</ion-label>
+        </ion-segment-button>
+      </ion-segment>
+      <span v-if="oauthProbed && draft.authType !== 'oauth'" :class="$style.oauthProbeHint">
+        {{ t('plugins.addServer.oauthProbed') }}
+      </span>
+    </div>
+
+    <!-- OAuth Section (when authType is oauth) -->
+    <template v-if="draft.authType === 'oauth'">
+      <!-- Client ID & Secret (always visible, optional) -->
+      <div :class="$style.field">
+        <ion-input
+          v-model="oauthClientId"
+          :label="t('plugins.addServer.oauthClientId')"
+          fill="outline"
+          label-placement="stacked"
+          :placeholder="t('plugins.addServer.oauthClientIdPlaceholder')"
+        />
+        <span :class="$style.fieldHint">{{ t('plugins.addServer.oauthClientIdHint') }}</span>
+      </div>
+      <div :class="$style.field">
+        <ion-input
+          v-model="oauthClientSecret"
+          :label="t('plugins.addServer.oauthClientSecret')"
+          fill="outline"
+          label-placement="stacked"
+          :placeholder="t('plugins.addServer.oauthClientSecretPlaceholder')"
+          type="password"
+        />
+        <span :class="$style.fieldHint">{{ t('plugins.addServer.oauthClientSecretHint') }}</span>
+      </div>
+
+      <!-- Redirect URI hint -->
+      <div :class="$style.field">
+        <label :class="$style.fieldLabel">{{ t('plugins.addServer.oauthRedirectUri') }}</label>
+        <div :class="$style.redirectUriBox">
+          <code>http://127.0.0.1:27182/callback</code>
+        </div>
+        <span :class="$style.fieldHint">{{ t('plugins.addServer.oauthRedirectUriHint') }}</span>
+      </div>
+
+      <!-- Connection status -->
+      <div :class="$style.oauthSection">
+        <!-- Connected -->
+        <div v-if="oauthStatus === 'connected'" :class="$style.oauthConnected">
+          <CheckCircle2 :size="16" :class="$style.oauthConnectedIcon" />
+          <div :class="$style.oauthConnectedInfo">
+            <span :class="$style.oauthConnectedLabel">{{ t('plugins.addServer.oauthConnected') }}</span>
+            <span v-if="oauthExpiresAt" :class="$style.oauthExpiry">
+              {{ t('plugins.addServer.oauthExpiry', { time: new Date(oauthExpiresAt).toLocaleString() }) }}
+            </span>
+          </div>
+          <ion-button fill="clear" size="small" color="danger" @click="disconnectOAuth">
+            <LogOut :size="14" style="margin-right: 4px;" />
+            {{ t('plugins.addServer.oauthDisconnect') }}
+          </ion-button>
+        </div>
+
+        <!-- Connecting -->
+        <div v-else-if="oauthStatus === 'connecting'" :class="$style.oauthConnecting">
+          <ion-spinner name="crescent" />
+          <span>{{ t('plugins.addServer.oauthConnecting') }}</span>
+        </div>
+
+        <!-- Error -->
+        <div v-else-if="oauthStatus === 'error'" :class="$style.oauthError">
+          <AlertCircle :size="16" :class="$style.oauthErrorIcon" />
+          <span>{{ oauthError }}</span>
+          <ion-button fill="clear" size="small" @click="connectOAuth">
+            {{ t('plugins.addServer.oauthTryAgain') }}
+          </ion-button>
+        </div>
+
+        <!-- Idle (not connected) -->
+        <div v-else :class="$style.oauthIdle">
+          <p :class="$style.oauthHint">{{ t('plugins.addServer.oauthHint') }}</p>
+          <ion-button fill="outline" size="small" :disabled="!isFormValid" @click="connectOAuth">
+            <LogIn :size="14" style="margin-right: 4px;" />
+            {{ t('plugins.addServer.oauthConnect') }}
+          </ion-button>
+        </div>
+      </div>
+    </template>
+
+    <!-- Static Headers (when authType is static-headers) -->
+    <div v-if="draft.authType === 'static-headers'" :class="$style.field">
       <label :class="$style.fieldLabel">{{ t('plugins.addServer.headers') }}</label>
       <p :class="$style.fieldHint">{{ t('plugins.addServer.headersHint') }}</p>
 
@@ -263,7 +495,7 @@ const isEditing = computed(() => !!props.editServer)
           :label="t('plugins.addServer.headerValue')"
           fill="outline"
           label-placement="stacked"
-          :placeholder="t('plugins.addServer.headerValuePlaceholder')"
+          :placeholder="isEditing && !row.value ? t('plugins.addServer.headerValueKept') : t('plugins.addServer.headerValuePlaceholder')"
           type="password"
           :class="$style.headerInput"
         />
@@ -474,5 +706,88 @@ const isEditing = computed(() => !!props.editServer)
   display: flex;
   justify-content: flex-end;
   gap: var(--spacing--sm, 8px);
+}
+
+// --- OAuth ---
+.redirectUriBox {
+  background: var(--n8n-desk--surface-bg, var(--color--foreground));
+  border: 1px solid var(--n8n-desk--content-bg, var(--color--background));
+  border-radius: 8px;
+  padding: 8px 12px;
+
+  code {
+    font-size: 13px;
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    color: var(--color--text--shade-1);
+    user-select: all;
+  }
+}
+
+.oauthProbeHint {
+  display: block;
+  font-size: 12px;
+  color: var(--color--success, #10b981);
+  margin-top: 6px;
+  font-weight: 500;
+}
+
+.oauthSection {
+  margin-bottom: var(--spacing--md, 16px);
+  padding: 16px;
+  border-radius: 10px;
+  background: var(--n8n-desk--surface-bg, var(--color--foreground));
+  border: 1px solid var(--n8n-desk--content-bg, var(--color--background));
+}
+
+.oauthConnected {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.oauthConnectedIcon { color: var(--color--success, #10b981); flex-shrink: 0; }
+
+.oauthConnectedInfo { flex: 1; }
+
+.oauthConnectedLabel {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color--success, #10b981);
+}
+
+.oauthExpiry {
+  display: block;
+  font-size: 12px;
+  color: var(--color--text--tint-1);
+  margin-top: 2px;
+}
+
+.oauthConnecting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--color--text--tint-1);
+}
+
+.oauthError {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--color--danger, #dc2626);
+}
+
+.oauthErrorIcon { flex-shrink: 0; }
+
+.oauthIdle {
+  text-align: center;
+}
+
+.oauthHint {
+  font-size: 13px;
+  color: var(--color--text--tint-1);
+  margin: 0 0 12px;
 }
 </style>

@@ -1,11 +1,28 @@
 // --- Standalone MCP Server (quick-add) ---
 
+export type ServerAuthType = 'static-headers' | 'oauth'
+
+export interface ServerOAuthStatus {
+  connected: boolean
+  expiresAt?: string    // ISO 8601
+  scope?: string
+}
+
 export interface StandaloneMcpServer {
   id: string
   name: string
   description?: string
   url: string
+  /** Auth method — defaults to 'static-headers' for back-compat (treat undefined as 'static-headers') */
+  authType?: ServerAuthType
+  /** Static header names whose values are stored in keychain (only when authType is 'static-headers') */
   headerNames?: string[]
+  /** OAuth client ID from dynamic registration (only when authType is 'oauth') */
+  oauthClientId?: string
+  /** Base URL used for OAuth discovery (only when authType is 'oauth') */
+  oauthDiscoveryUrl?: string
+  /** OAuth connection status (only when authType is 'oauth') */
+  oauthStatus?: ServerOAuthStatus
   enabled: boolean
   requireApproval: boolean
   addedAt: string
@@ -78,7 +95,9 @@ export interface LoadedSkill {
   userInvocable: boolean
   allowedTools?: string[]
   directory: string
-  source: 'user' | string
+  source: 'user' | 'built-in' | string
+  /** True for skills bundled with the app (shipped in src/data/default-skills.ts) */
+  builtIn?: boolean
 }
 
 // --- Discovered Tool ---

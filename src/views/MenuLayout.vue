@@ -14,6 +14,7 @@ import { useSidebarResize } from '@/composables/useSidebarResize'
 import { useConnection } from '@/composables/useConnection'
 import { useInstancesStore } from '@/stores/instances'
 import { useAuthStore } from '@/stores/auth'
+import { useSettingsStore } from '@/stores/settings'
 import ChatSidebar from '@/components/sidebar/ChatSidebar.vue'
 import CoworkSidebar from '@/components/sidebar/CoworkSidebar.vue'
 import WorkflowSidebar from '@/components/sidebar/WorkflowSidebar.vue'
@@ -27,6 +28,7 @@ const { t } = useI18n()
 const { isMobile } = usePlatform()
 const instancesStore = useInstancesStore()
 const authStore = useAuthStore()
+const settingsStore = useSettingsStore()
 const { status: connectionStatus, startMonitoring } = useConnection()
 
 const {
@@ -39,7 +41,6 @@ const {
 
 const mobileMenuOpen = ref(false)
 const switcherOpen = ref(false)
-const settingsOpen = ref(false)
 
 const activeMode = ref(deriveMode())
 
@@ -97,7 +98,7 @@ function onModeChange(event: CustomEvent) {
 }
 
 function openSettings() {
-  settingsOpen.value = true
+  settingsStore.openSettings()
   mobileMenuOpen.value = false
 }
 
@@ -352,7 +353,10 @@ const sidebarStyle = computed(() => ({
     </template>
 
     <!-- Settings Modal -->
-    <AppSettings v-model:is-open="settingsOpen" />
+    <AppSettings
+      :is-open="settingsStore.settingsOpen"
+      @update:is-open="(v: boolean) => v ? settingsStore.openSettings() : settingsStore.closeSettings()"
+    />
 
     <!-- Re-Login Modal (session expired) -->
     <ReLoginModal

@@ -269,6 +269,7 @@ export function registerAuthHandlers(): void {
           listener.redirectUri,
           state,
           codeVerifier,
+          { requestAllScopes: true },
         )
 
         await shell.openExternal(authUrl)
