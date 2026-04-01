@@ -63,4 +63,8 @@ capacitor-*.tgz
 .worktrees/
 .security-key
 logs/security/
+
+# top secret files
 MONETARIZATION.md
+docs/prds/n8n-desk-ops
+docs/prds/n8n-desk-ops/*
