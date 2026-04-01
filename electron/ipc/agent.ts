@@ -2,12 +2,16 @@ import { ipcMain, BrowserWindow, safeStorage } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
-import type { AgentStreamEvent, AgentRunnerConfig, LlmProviderConfig } from '../agent/types'
+import type { AgentStreamEvent, AgentRunnerConfig, LlmProviderConfig, ConversationMessage } from '../agent/types'
 import { type AgentRunner } from '../agent/types'
 import { createAgentRunner, resolveLlmConfig } from '../agent/factory'
 import { refreshTokens } from '../oauth'
 import { pluginManager } from '../plugin-manager'
 import { loadAllSkills, buildSkillDescriptions } from '../skill-loader'
+import { buildCoworkPolicy, buildWorkflowPolicy } from '../agent/sandbox-policy'
+import { createFileTools } from '../agent/file-tools'
+import { jsComputeTool } from '../agent/js-sandbox'
+import { WORKFLOW_MODE_SYSTEM_PROMPT, COWORK_MODE_SYSTEM_PROMPT } from '../agent/system-prompts'
 
 const BASE_DIR = path.join(os.homedir(), '.n8n-desk')
 
@@ -226,10 +230,14 @@ function extractWorkflowFromResult(result: unknown): { workflowId: string; name:
  * Read session JSONL and build conversation history for multi-turn memory.
  * Returns messages in chronological order, combining text chunks into
  * complete assistant messages.
+ *
+ * @param sessionId - The session ID
+ * @param mode - The agent mode ('workflow' | 'cowork'), determines session directory
  */
 async function loadConversationHistory(
   sessionId: string,
-): Promise<import('./types').ConversationMessage[]> {
+  mode: 'workflow' | 'cowork' = 'workflow',
+): Promise<ConversationMessage[]> {
   const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
   if (!config?.defaultInstanceId) return []
 
@@ -238,14 +246,14 @@ async function loadConversationHistory(
     'instances',
     config.defaultInstanceId,
     'sessions',
-    'workflow',
+    mode,
     `${sessionId}.jsonl`,
   )
 
   try {
     const content = await fs.readFile(jsonlPath, 'utf-8')
     const lines = content.trim().split('\n').filter(Boolean)
-    const history: import('./types').ConversationMessage[] = []
+    const history: ConversationMessage[] = []
 
     for (const line of lines) {
       try {
@@ -273,7 +281,7 @@ async function loadConversationHistory(
 const sessionTextAccumulator = new Map<string, string>()
 
 /** Flush the accumulated assistant text to JSONL and clear the buffer */
-async function flushAssistantMessage(sessionId: string): Promise<void> {
+async function flushAssistantMessage(sessionId: string, mode: 'workflow' | 'cowork' = 'workflow'): Promise<void> {
   const text = sessionTextAccumulator.get(sessionId)
   sessionTextAccumulator.delete(sessionId)
   if (!text?.trim()) return
@@ -286,7 +294,7 @@ async function flushAssistantMessage(sessionId: string): Promise<void> {
     'instances',
     config.defaultInstanceId,
     'sessions',
-    'workflow',
+    mode,
     `${sessionId}.jsonl`,
   )
 
@@ -303,7 +311,7 @@ async function flushAssistantMessage(sessionId: string): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
-async function appendToSessionJsonl(sessionId: string, event: AgentStreamEvent): Promise<void> {
+async function appendToSessionJsonl(sessionId: string, event: AgentStreamEvent, mode: 'workflow' | 'cowork' = 'workflow'): Promise<void> {
   // Find the active instance to determine the JSONL path
   const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
   if (!config?.defaultInstanceId) return
@@ -313,7 +321,7 @@ async function appendToSessionJsonl(sessionId: string, event: AgentStreamEvent):
     'instances',
     config.defaultInstanceId,
     'sessions',
-    'workflow',
+    mode,
     `${sessionId}.jsonl`
   )
 
@@ -329,11 +337,11 @@ async function appendToSessionJsonl(sessionId: string, event: AgentStreamEvent):
     }
     case 'done':
       // Flush accumulated assistant text before the session ends
-      await flushAssistantMessage(sessionId)
+      await flushAssistantMessage(sessionId, mode)
       break
     case 'tool_call_start':
       // Flush any accumulated assistant text before the tool call
-      await flushAssistantMessage(sessionId)
+      await flushAssistantMessage(sessionId, mode)
       message = {
         id: `msg_${Date.now()}`,
         role: 'tool',
@@ -425,10 +433,17 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
   if (handlersRegistered) return
   handlersRegistered = true
 
-  // The workflow agent system prompt
-  const workflowSystemPrompt = `You are a workflow automation assistant for n8n. You help users create, manage, and execute n8n workflows using the available MCP tools. Be concise and helpful. When creating workflows, always validate before creating. When executing workflows, explain what will happen before running.`
+  /** Options passed from the renderer alongside sessionId and message. */
+  interface AgentInvokeOptions {
+    /** Folders the user has attached to this session */
+    attachedFolders?: Array<{ path: string }>
+    /** Agent mode — determines sandbox policy, system prompt, and session path */
+    mode?: 'workflow' | 'cowork'
+  }
 
-  ipcMain.handle('agent:invoke', async (_event, sessionId: string, message: string) => {
+  ipcMain.handle('agent:invoke', async (_event, sessionId: string, message: string, options?: AgentInvokeOptions) => {
+    const mode = options?.mode ?? 'workflow'
+    const attachedFolders = options?.attachedFolders ?? []
     try {
       const llmConfig = await resolveLlmConfig()
       if (!llmConfig) {
@@ -475,6 +490,19 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       }
       activeRunners.set(sessionId, active)
 
+      // --- Sandbox Policy & File Tools ---
+
+      // Build per-session sandbox policy based on mode and attached folders.
+      // If no folders are attached, the policy still grants read access to
+      // ~/.n8n-desk/ (minus sensitive files) and write access to skills/.
+      const sandboxPolicy = mode === 'cowork'
+        ? buildCoworkPolicy(attachedFolders, BASE_DIR)
+        : buildWorkflowPolicy(attachedFolders, BASE_DIR)
+
+      // Create sandboxed file tools (13 format tools) and include jsComputeTool.
+      // These are always available — they do NOT require approval.
+      const fileTools = createFileTools(sandboxPolicy)
+
       // --- Plugin & Skill Integration ---
 
       const { instanceId } = instanceConfig
@@ -483,9 +511,18 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       // For Claude SDK: passed as customMcpServers (SDK handles tool discovery).
       // For Deep Agents: pre-built as LangChain tools via buildDeepAgentsTools.
       const customMcpServers = await pluginManager.buildClaudeSdkMcpServers(instanceId)
-      const customTools = backend === 'deep-agents'
+      const pluginTools = backend === 'deep-agents'
         ? await pluginManager.buildDeepAgentsTools(instanceId)
         : undefined
+
+      // Merge file tools + jsComputeTool + plugin tools into a single array.
+      // File tools and jsComputeTool are always included; plugin tools are
+      // only included for the Deep Agents backend (Claude SDK uses MCP servers).
+      const customTools = [
+        ...fileTools,
+        jsComputeTool,
+        ...(pluginTools ?? []),
+      ]
 
       // Load all skills and filter to auto-invocable ones.
       // Skills with disableModelInvocation=true are only invocable via /skill-name
@@ -493,12 +530,17 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       const allSkills = await loadAllSkills()
       const autoInvocableSkills = allSkills.filter((s) => !s.disableModelInvocation)
 
+      // Select mode-specific system prompt
+      const baseSystemPrompt = mode === 'cowork'
+        ? COWORK_MODE_SYSTEM_PROMPT
+        : WORKFLOW_MODE_SYSTEM_PROMPT
+
       // Inject skill descriptions into the system prompt (lazy loading:
       // only names + descriptions, NOT full content — expanded on invocation).
       const skillBlock = buildSkillDescriptions(autoInvocableSkills)
       const augmentedPrompt = skillBlock
-        ? `${workflowSystemPrompt}\n\n${skillBlock}`
-        : workflowSystemPrompt
+        ? `${baseSystemPrompt}\n\n${skillBlock}`
+        : baseSystemPrompt
 
       // Compute extended interruptOnTools: built-in destructive tools + all tools
       // from standalone servers that have requireApproval enabled.
@@ -530,7 +572,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       ]
 
       // Load conversation history for multi-turn memory
-      const conversationHistory = await loadConversationHistory(sessionId)
+      const conversationHistory = await loadConversationHistory(sessionId, mode)
       console.log(`[n8n-desk] Loaded ${conversationHistory.length} messages from session history`)
 
       const runnerConfig: AgentRunnerConfig = {
@@ -543,6 +585,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         customTools,
         skills: autoInvocableSkills,
         conversationHistory,
+        sandboxPolicy,
       }
 
       console.log('[n8n-desk] System prompt:\n', augmentedPrompt)
@@ -554,7 +597,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
           for await (const event of runner.invoke(sessionId, message, runnerConfig)) {
             if (active.stopped) break
             mainWindow.webContents.send('agent:event', event)
-            await appendToSessionJsonl(sessionId, event)
+            await appendToSessionJsonl(sessionId, event, mode)
 
             // Auto-emit workflow preview when a tool result contains workflow JSON
             if (event.type === 'tool_call_result' && event.data.success) {
