@@ -1,30 +1,32 @@
 <script setup lang="ts">
 import { IonSearchbar } from '@ionic/vue'
 import { Plus, Search } from 'lucide-vue-next'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SessionList from './SessionList.vue'
-import { mockCoworkSessions } from '@/mocks/sidebar'
+import { useCoworkSessionsStore } from '@/stores/cowork-sessions'
 
 const { t } = useI18n()
+const store = useCoworkSessionsStore()
 const searchQuery = ref('')
 const searchVisible = ref(false)
-const activeSessionId = ref<string | null>(null)
 
-function newTask() {
-  // TODO: create new cowork session
+const activeSessionId = computed(() => store.activeSessionId)
+
+async function newTask() {
+  await store.createSession()
 }
 
-function selectSession(sessionId: string) {
-  activeSessionId.value = sessionId
+async function selectSession(sessionId: string) {
+  await store.selectSession(sessionId)
 }
 
 function renameSession(_sessionId: string, _newTitle: string) {
   // TODO: wire to cowork store when implemented
 }
 
-function deleteSession(_sessionId: string) {
-  // TODO: wire to cowork store when implemented
+async function deleteSession(sessionId: string) {
+  await store.deleteSession(sessionId)
 }
 </script>
 
@@ -53,7 +55,7 @@ function deleteSession(_sessionId: string) {
 
     <!-- Session List -->
     <SessionList
-      :sessions="mockCoworkSessions"
+      :sessions="store.sessions"
       :active-session-id="activeSessionId"
       :search-query="searchQuery"
       @select="selectSession"
