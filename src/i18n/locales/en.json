@@ -207,6 +207,49 @@
     "reconnecting": "Reconnecting to {label}...",
     "disconnected": "Disconnected"
   },
+  "cowork": {
+    "tools": {
+      "executeWorkflow": "Execute Workflow",
+      "getExecutionResult": "Get Execution Result",
+      "searchWorkflows": "Search Workflows",
+      "readFile": "Read File",
+      "writeFile": "Write File",
+      "editFile": "Edit File",
+      "listFiles": "List Files",
+      "searchFiles": "Search Files",
+      "searchFileContents": "Search File Contents"
+    },
+    "status": {
+      "running": "Running...",
+      "completed": "Completed",
+      "failed": "Failed",
+      "waitingApproval": "Waiting for approval"
+    },
+    "approval": {
+      "title": "Approval Required",
+      "approve": "Approve",
+      "reject": "Reject",
+      "executePrompt": "The agent wants to execute workflow \"{name}\".",
+      "writeFilePrompt": "The agent wants to write to \"{path}\".",
+      "editFilePrompt": "The agent wants to edit \"{path}\"."
+    },
+    "emptyState": {
+      "title": "Cowork Agent",
+      "description": "Describe a task -- the agent will use your files and n8n workflows to get it done.",
+      "noConfig": "Configure an AI backend in Settings to get started."
+    },
+    "input": {
+      "placeholder": "Describe a task to accomplish...",
+      "send": "Send",
+      "stop": "Stop agent"
+    },
+    "sessions": {
+      "title": "Tasks",
+      "new": "New task",
+      "noSessions": "No tasks yet",
+      "untitled": "Untitled task"
+    }
+  },
   "workflow": {
     "tools": {
       "searchNodes": "Search Nodes",
