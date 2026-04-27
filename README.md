@@ -228,6 +228,24 @@ collaboration, and compliance — they don't lock away the core.
 
 ---
 
+## Next Steps
+
+The road to first release:
+
+1. **Native builds** — packaging the Electron desktop app for macOS, Windows, and
+   Linux, plus Capacitor builds for iOS and Android.
+2. **Alpha release** — first public build, distributed to waitlist members for
+   early feedback before the broader open beta.
+
+**You can help shape it:**
+
+- **[Join the waitlist →](https://n8n-desk.app)** Be the first to know when alpha
+  builds are ready.
+- **[Star the repo →](https://github.com/geckse/n8n-desk)** Support the project and
+  keep track of development as it ships.
+
+---
+
 ## Open Source. Community Driven.
 
 n8n-desk is an independent, open-source community project. It is **not officially
