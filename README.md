@@ -212,6 +212,27 @@ full architecture, see [CLAUDE.md](CLAUDE.md).
 
 ---
 
+## Releases
+
+Tagged GitHub releases automatically build and attach installers for macOS, Windows, and Linux.
+
+```
+# bump version, push tag
+git tag v0.2.0 && git push --tags
+```
+
+Then on GitHub: Draft a release → choose the tag → Publish. CI runs in parallel on `macos-latest` / `windows-latest` / `ubuntu-latest` and uploads:
+
+- **macOS**: `*.dmg` (universal: arm64 + x64) and `*.zip`
+- **Windows**: `n8n-desk-setup.exe` (Squirrel installer) and `*.zip`
+- **Linux**: `*.deb`, `*.AppImage`, and `*.zip`
+
+Artifacts appear on the release page in ~10 minutes. Until code-signing is wired up, first-launch OS warnings are expected (right-click → Open on macOS, "More info → Run anyway" on Windows).
+
+For a manual dry run without publishing a release, trigger the **Release Build** workflow via the Actions tab — artifacts download from the run page.
+
+---
+
 ## Status & roadmap
 
 **Status: Coming Soon.** n8n-desk is in pre-release. The waitlist is open at

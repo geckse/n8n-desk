@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Lockfiles — pnpm only (package-lock.json is regenerated accidentally by `npm install`)
+package-lock.json
+
 # Build output
 dist/
 electron/dist/

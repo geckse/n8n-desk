@@ -1,0 +1,86 @@
+name: Release Build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64,x64
+            artifact_glob: |
+              out/make/**/*.dmg
+              out/make/**/*.zip
+          - os: windows-latest
+            arch: x64
+            artifact_glob: |
+              out/make/squirrel.windows/**/*.exe
+              out/make/squirrel.windows/**/*.nupkg
+              out/make/squirrel.windows/**/RELEASES
+              out/make/zip/**/*.zip
+          - os: ubuntu-latest
+            arch: x64
+            artifact_glob: |
+              out/make/**/*.deb
+              out/make/**/*.AppImage
+              out/make/**/*.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Linux packaging tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg rpm
+
+      - name: Sync version to release tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Setting package.json version to $TAG"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.argv[1];fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');" "$TAG"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build renderer (Vite)
+        run: pnpm build
+
+      - name: Build Electron main process
+        run: pnpm build:electron:ts
+
+      - name: Run electron-forge make
+        run: pnpm exec electron-forge make --arch=${{ matrix.arch }}
+
+      - name: Upload artifacts to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_glob }}
+
+      - name: Upload artifacts (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: n8n-desk-${{ matrix.os }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error

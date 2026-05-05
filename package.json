@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "main": "electron/dist/main.js",
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
@@ -11,6 +12,7 @@
     "build:electron:ts": "node scripts/build-electron.mjs",
     "dev:electron": "pnpm build:electron:ts && concurrently -k \"vite\" \"electron .\"",
     "build:electron": "pnpm build && pnpm build:electron:ts && electron-forge package",
+    "make:electron": "pnpm build && pnpm build:electron:ts && electron-forge make",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint 'src/**/*.{ts,vue}' 'electron/**/*.ts'"
@@ -60,6 +62,10 @@
   "devDependencies": {
     "@capacitor/cli": "^6.2.1",
     "@electron-forge/cli": "^7.0.0",
+    "@electron-forge/maker-appimage": "^7.0.0",
+    "@electron-forge/maker-deb": "^7.0.0",
+    "@electron-forge/maker-dmg": "^7.0.0",
+    "@electron-forge/maker-squirrel": "^7.0.0",
     "@electron-forge/maker-zip": "^7.0.0",
     "@types/markdown-it": "^14.1.2",
     "@types/markdown-it-link-attributes": "^3.0.5",
