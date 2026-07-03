@@ -941,6 +941,48 @@ npx cap open ios    # or android
 
 ---
 
+## Local Agent Rules (Both Runners)
+
+> Hard invariants distilled from the agent revalidation audit (see `docs/agent-revalidation-findings.md`). Each rule exists because breaking it caused a real, verified defect — several of them silent (secrets leaked, destructive tools run unapproved, a whole backend emitting nothing). Uphold these in **both** `deep-agents-runner.ts` and `claude-sdk-runner.ts`.
+
+### Approval & Human-in-the-Loop
+
+- **Approval matching MUST be namespace-aware.** The Claude Agent SDK delivers MCP tool names as `mcp__{server}__{tool}` (e.g. `mcp__n8n__execute_workflow`), not the bare name. Always match with `name === t || name.endsWith('__' + t)` — never a bare-name `Set.has()`. A bare-name check silently returns "allow" and the approval gate never fires. Use one shared matcher for both runners.
+- **These tools ALWAYS require approval, in both runners:** `create_workflow_from_code`, `update_workflow`, `execute_workflow`, `publish_workflow`, `unpublish_workflow`, `archive_workflow`, plus any custom-server tool flagged `requireApproval`. `unpublish_workflow` counts — deactivating a live workflow is destructive.
+- **Approval must gate *execution*, not just emit an event.** Deep Agents: surface `approval_required`, then resume the LangGraph interrupt with `new Command({ resume: decision })` on the same `thread_id` — a rejected/approved decision that doesn't actually block or resume the tool is a bug. Keep the `MemorySaver`/checkpointer alive for the whole session, not per-call.
+- **Exactly one component emits `approval_resolved`** (the runner), carrying the **real** approval id — never a synthetic `'latest'`. The event channel must be independent of the SDK message loop so a pending `approval_required` can't deadlock in an undrained queue.
+
+### Filesystem Sandbox & Secrets
+
+- **ALL file access flows through `sandbox-filter.ts`** (`resolveAndValidatePath` → `isReadDenied` / `isWriteAllowed`) in both backends. Never grant a framework's built-in file tools (e.g. deepagents `read_file`/`write_file`/`edit_file`/`ls`/`glob`/`grep`) that route around the filter. If a backend offers built-ins, disable them and expose the shared `createFileTools(policy)` set instead — this also keeps the toolset identical across backends.
+- **Honor `mount.mode`.** A `ro` mount must reject writes. Never construct all mounts as `rw`; thread the user's chosen mode through the IPC layer.
+- **Never expose secrets to the agent.** `llm.json`, `auth.json`, `mcp-auth.json`, `tokens.enc`, `mcp-tokens.enc`, `credentials.json` under `~/.n8n-desk/` stay denied. Mount only what the agent needs (e.g. `skills/`) — do not read-only-mount all of `~/.n8n-desk/` by default.
+- **Path resolution is symlink-safe and case-correct.** Rely on `fs.realpath` (which canonicalizes on-disk casing) before deny-list checks — do not add ad-hoc case handling.
+
+### n8n MCP Tool Surface
+
+- **Do NOT hardcode the n8n MCP tool list or schemas.** Discover tools dynamically via `tools/list` (`listToolsWithUrl` → `createDynamicMcpTools`). The server's names, schemas, and tool count drift; hardcoded wrappers silently send wrong shapes (e.g. dropping `execute_workflow` inputs). The server is the authority — cross-check against `n8n-master/packages/cli/src/modules/mcp/`.
+- **The server's mandated build order is real:** `get_sdk_reference` → `search_nodes` → (`get_suggested_nodes`) → `get_node_types` (for every node used) → write → `validate_workflow` (fix-and-revalidate) → `create_workflow_from_code` → `execute_workflow` → `publish_workflow`. Keep `get_sdk_reference` reachable and teach it in the workflow-mode prompt. Never let the prompt reference tools that don't exist (`create_workflow`, phantom "remote code sandbox").
+- **MCP calls need explicit timeouts aligned to server budgets.** The SDK's 60s default kills `execute_workflow` (5-minute server budget). Set per-call timeouts and thread the abort signal so `stop()` cancels in-flight calls.
+- **`jsonSchemaToZod` must handle unions.** Support `anyOf`/`oneOf`/`allOf`, numeric enums, nested optionals, and preserve descriptions/defaults — the full dynamic surface depends on it.
+
+### Execution Safety & Lifecycle
+
+- **`js_compute` runs off the main thread with a hard wall-clock kill.** The `vm` timeout only bounds *synchronous* code; an async microtask bomb starves the Electron main-process event loop. Use `worker_threads` with a terminate-on-timeout and memory cap (keep the prototype-freeze / `codeGeneration:false` protections).
+- **`stop()` must cancel in-flight LLM calls, MCP HTTP calls, and `js_compute`** — not just the agent loop. Thread the `AbortController.signal` everywhere.
+- **Every session MUST end with a terminal `done` (or `error`) event.** The renderer keys "running" state on it; a missing terminal event locks the UI forever. Guard the invoke `finally` with an identity check (`if (activeRunners.get(id) === active)`) so a replacement runner isn't orphaned by a stale IIFE.
+- **Backend selection honors the configured `backend` field** in `llm.json` — do not derive it from the provider. `resolveLlmConfig()` must preserve `backend`.
+- **Refresh tokens mid-session.** Access tokens are not frozen at invoke time; catch `McpUnauthorizedError`, refresh, and retry (or surface re-auth) so long sessions don't die silently. Stop all active runners on instance switch.
+
+### Streaming, Memory & Parity
+
+- **Both runners emit the same `AgentStreamEvent` types with equivalent semantics** (`text_chunk`, `thinking`, `tool_call_start`, `tool_call_result`, `approval_required`/`_resolved`, `todo_update`, `error`, `done`, `workflow_preview`). If one backend can emit it, the other must too — including `todo_update`. Match the event source to the API: Deep Agents uses `streamEvents({version:'v2'})`, not `stream()`.
+- **Route events to their session.** Never drop events for a non-active session — that leaves background sessions permanently "running" and loses their output. Update the owning session's store regardless of which is focused.
+- **Conversation history must preserve tool results and intermediate assistant text** (workflow IDs, execution IDs). Replaying only the final assistant segment breaks multi-turn continuity. Do not duplicate the current user message into both the history block and the prompt.
+- **Changes to either runner ship with tests against BOTH.** Maintain a shared parity suite that drives `invoke`/`stop`/`approve` with a mock LLM + mock MCP server and asserts identical event sequences. No agent behavior change lands without it.
+
+---
+
 ## What NOT To Do
 
 - **Don't replicate n8n's workflow editor.** n8n-desk is a conversational interface, not a visual canvas builder.

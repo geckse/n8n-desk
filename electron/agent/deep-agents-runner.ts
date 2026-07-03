@@ -225,7 +225,8 @@ export class DeepAgentsRunner implements AgentRunner {
       }
 
       // MCP workflow tools (require approval via DESTRUCTIVE_TOOLS)
-      tools.push(...createMcpTools(config.instanceUrl, config.accessToken))
+      // Uses the resolved MCP URL + token (default n8n MCP or custom override).
+      tools.push(...createMcpTools(config.mcpUrl, config.mcpAccessToken))
 
       // Merge pre-built LangChain tools from PluginManager.buildDeepAgentsTools()
       if (config.customTools && config.customTools.length > 0) {

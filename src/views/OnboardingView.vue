@@ -2,9 +2,9 @@
 import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent,
   IonButton, IonInput, IonSpinner, IonIcon, IonText,
-  IonButtons,
+  IonButtons, IonToggle,
 } from '@ionic/vue'
-import { arrowBack } from 'ionicons/icons'
+import { arrowBack, chevronDown, chevronUp } from 'ionicons/icons'
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -29,15 +29,40 @@ function goBack(): void {
 }
 
 // --- Step state ---
-// Steps: 1=URL, 2=Credential Login, 3=OAuth (conditional), 4=Done
-// For chatUsers or instances without OAuth, step 3 is skipped (totalSteps=3)
-const currentStep = ref<1 | 2 | 3 | 4>(1)
+// Steps: 1=URL, 2=Credential Login, 3=OAuth (conditional), 3.5/4=MCP OAuth (conditional), Done
+// Step semantics:
+//   currentStep 1 → URL
+//   currentStep 2 → Credential Login
+//   currentStep 3 → OAuth (skipped for chatUsers / no OAuth support)
+//   currentStep 4 → Custom MCP OAuth (only if user enabled it in Advanced options)
+//   currentStep 5 → Done
+const currentStep = ref<1 | 2 | 3 | 4 | 5>(1)
 const needsOAuth = ref(false)
-const totalSteps = computed(() => needsOAuth.value ? 4 : 3)
 
-/** Map the visual step number based on whether OAuth is needed */
-function doneStep(): 3 | 4 {
-  return needsOAuth.value ? 4 : 3
+// --- Advanced options ---
+const showAdvancedOptions = ref(false)
+const useCustomMcp = ref(false)
+const customMcpUrl = ref('')
+
+const totalSteps = computed(() => {
+  let count = 2 // URL + credential login
+  if (needsOAuth.value) count += 1
+  if (useCustomMcp.value) count += 1
+  count += 1 // done
+  return count
+})
+
+/** The step number that represents "Done" in the current flow. */
+function doneStep(): 3 | 4 | 5 {
+  let step = 3
+  if (needsOAuth.value) step += 1
+  if (useCustomMcp.value) step += 1
+  return step as 3 | 4 | 5
+}
+
+/** The step number that represents MCP-auth in the current flow (only used when useCustomMcp is true). */
+function mcpAuthStep(): 3 | 4 {
+  return (needsOAuth.value ? 4 : 3) as 3 | 4
 }
 
 // --- Step 1: URL input ---
@@ -62,7 +87,11 @@ const credError = ref<string | null>(null)
 const isSigningIn = ref(false)
 const signInError = ref<string | null>(null)
 
-// --- Step 4 (or 3 for chatUsers): Connected ---
+// --- MCP OAuth step state ---
+const isMcpAuthing = ref(false)
+const mcpAuthError = ref<string | null>(null)
+
+// --- Done step: Connected ---
 const instanceLabel = ref('')
 const instanceColor = ref('#ff6d5a')
 const agentCount = ref<number | null>(null)
@@ -78,13 +107,13 @@ const PRESET_COLORS = [
 ]
 
 const stepLabel = computed(() => {
-  switch (currentStep.value) {
-    case 1: return t('onboarding.stepConnect')
-    case 2: return t('onboarding.stepSignIn')
-    case 3: return needsOAuth.value ? t('onboarding.stepAuthorize') : t('onboarding.stepDone')
-    case 4: return t('onboarding.stepDone')
-    default: return ''
-  }
+  const step = currentStep.value
+  if (step === 1) return t('onboarding.stepConnect')
+  if (step === 2) return t('onboarding.stepSignIn')
+  if (step === doneStep()) return t('onboarding.stepDone')
+  if (useCustomMcp.value && step === mcpAuthStep()) return t('onboarding.stepMcpAuth')
+  if (needsOAuth.value && step === 3) return t('onboarding.stepAuthorize')
+  return ''
 })
 
 // --- Step 1: Validate URL ---
@@ -208,8 +237,8 @@ async function submitCredentials(): Promise<void> {
         currentStep.value = 3
         void startSignIn()
       } else {
-        // chatUser or no OAuth → skip to Done
-        goToConnected()
+        // chatUser or no OAuth → maybe MCP-auth step, else Done
+        goAfterOAuth()
       }
     } else {
       if (result.errorCode === 'mfa_required') {
@@ -235,7 +264,7 @@ async function startSignIn(options?: { forceLocalhost?: boolean }): Promise<void
     const result = await login(instanceUrl.value, options)
 
     if (result.success) {
-      goToConnected()
+      goAfterOAuth()
     } else {
       if (result.errorCode === 'auth_timeout') {
         signInError.value = t('onboarding.errors.authTimeout')
@@ -255,12 +284,66 @@ async function startSignIn(options?: { forceLocalhost?: boolean }): Promise<void
 function skipOAuth(): void {
   // User chose to skip OAuth — they'll have Chat-only until they authorize later
   needsOAuth.value = false
+  goAfterOAuth()
+}
+
+function goAfterOAuth(): void {
+  // Route to MCP-auth mini-step if user enabled Advanced options + custom MCP URL,
+  // otherwise straight to Done.
+  if (useCustomMcp.value && customMcpUrl.value.trim() && authStore.isFullAccess) {
+    currentStep.value = mcpAuthStep()
+    void startMcpAuth()
+    return
+  }
   goToConnected()
 }
 
 function goToConnected(): void {
   currentStep.value = doneStep()
   void discoverAgents()
+}
+
+// --- Step 4 (conditional): MCP OAuth ---
+async function startMcpAuth(): Promise<void> {
+  if (!validatedInstanceId.value || !window.n8nDesk) {
+    goToConnected()
+    return
+  }
+  const trimmedUrl = normalizeUrl(customMcpUrl.value)
+  mcpAuthError.value = null
+  isMcpAuthing.value = true
+  try {
+    // Pre-flight discovery check
+    const validate = await window.n8nDesk.auth.mcp.validate(trimmedUrl)
+    if (!validate.success) {
+      mcpAuthError.value = validate.error ?? t('onboarding.errors.mcpDiscoveryFailed')
+      return
+    }
+    const result = await window.n8nDesk.auth.mcp.login(validatedInstanceId.value, trimmedUrl)
+    if (result.success) {
+      // Persist mcpServerUrl to the Pinia store copy
+      await instancesStore.updateInstance(validatedInstanceId.value, { mcpServerUrl: trimmedUrl })
+      goToConnected()
+    } else {
+      if (result.errorCode === 'auth_timeout') {
+        mcpAuthError.value = t('onboarding.errors.authTimeout')
+      } else if (result.errorCode === 'auth_cancelled') {
+        mcpAuthError.value = t('onboarding.errors.authCancelled')
+      } else {
+        mcpAuthError.value = result.error ?? t('onboarding.errors.mcpAuthFailed')
+      }
+    }
+  } catch {
+    mcpAuthError.value = t('onboarding.errors.mcpAuthFailed')
+  } finally {
+    isMcpAuthing.value = false
+  }
+}
+
+function skipMcpAuth(): void {
+  // User chose to configure MCP later — go straight to Done without persisting mcpServerUrl.
+  useCustomMcp.value = false
+  goToConnected()
 }
 
 // --- Done step: Agent Discovery ---
@@ -354,6 +437,36 @@ function goBackToStep2(): void {
             @keyup.enter="validateAndConnect"
           />
 
+          <!-- Advanced options (collapsible) -->
+          <button
+            type="button"
+            class="advanced-toggle"
+            @click="showAdvancedOptions = !showAdvancedOptions"
+          >
+            <ion-icon :icon="showAdvancedOptions ? chevronUp : chevronDown" />
+            <span>{{ t('onboarding.advancedOptions') }}</span>
+          </button>
+
+          <div v-if="showAdvancedOptions" class="advanced-panel">
+            <div class="advanced-toggle-row">
+              <label for="use-custom-mcp" class="advanced-label">
+                {{ t('onboarding.useCustomMcp') }}
+              </label>
+              <ion-toggle id="use-custom-mcp" v-model="useCustomMcp" />
+            </div>
+
+            <ion-input
+              v-if="useCustomMcp"
+              v-model="customMcpUrl"
+              :label="t('onboarding.mcpUrlLabel')"
+              :placeholder="t('onboarding.mcpUrlPlaceholder')"
+              fill="outline"
+              label-placement="stacked"
+              type="url"
+            />
+            <p v-if="useCustomMcp" class="mcp-hint">{{ t('onboarding.mcpUrlHelp') }}</p>
+          </div>
+
           <ion-button
             expand="block"
             :disabled="isValidating || !instanceUrl.trim()"
@@ -424,6 +537,11 @@ function goBackToStep2(): void {
             <span v-else>{{ t('onboarding.signInButton') }}</span>
           </ion-button>
 
+          <p class="privacy-note">
+            <ion-icon :icon="lockClosed" aria-hidden="true" />
+            <span>{{ t('reLogin.privacyNote') }}</span>
+          </p>
+
           <button class="back-link" @click="goBackToStep1">
             {{ t('onboarding.changeUrl') }}
           </button>
@@ -465,7 +583,43 @@ function goBackToStep2(): void {
           </div>
         </div>
 
-        <!-- Done step (step 3 for chatUsers, step 4 for full-access) -->
+        <!-- MCP OAuth mini-step (only when Advanced options + custom MCP URL was set) -->
+        <div
+          v-if="useCustomMcp && currentStep === mcpAuthStep() && currentStep !== doneStep()"
+          class="step-content"
+        >
+          <h2 class="step-title">{{ t('onboarding.stepMcpAuthTitle') }}</h2>
+          <p class="step-description">{{ t('onboarding.mcpAuthHelp') }}</p>
+
+          <div v-if="isMcpAuthing" class="signing-in">
+            <ion-spinner name="crescent" class="sign-in-spinner" />
+            <p class="sign-in-text">{{ t('onboarding.mcpAuthorizing', { hostname: customMcpUrl }) }}</p>
+            <p class="sign-in-hint">{{ t('onboarding.signInHint') }}</p>
+          </div>
+
+          <div v-if="mcpAuthError" class="sign-in-error">
+            <ion-icon :icon="alertCircle" color="danger" class="error-icon" />
+            <ion-text color="danger">
+              <p>{{ mcpAuthError }}</p>
+            </ion-text>
+            <div class="error-actions">
+              <ion-button @click="startMcpAuth" :disabled="isMcpAuthing">
+                {{ t('onboarding.tryAgain') }}
+              </ion-button>
+              <ion-button fill="outline" @click="skipMcpAuth">
+                {{ t('onboarding.mcpConfigureLater') }}
+              </ion-button>
+            </div>
+          </div>
+
+          <div v-if="!isMcpAuthing && !mcpAuthError" class="oauth-actions">
+            <button class="skip-link" @click="skipMcpAuth">
+              {{ t('onboarding.mcpConfigureLater') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Done step (variable position depending on which optional steps ran) -->
         <div v-if="currentStep === doneStep()" class="step-content">
           <div class="connected-header">
             <ion-icon :icon="checkmarkCircle" color="success" class="connected-icon" />
@@ -578,6 +732,55 @@ function goBackToStep2(): void {
   margin-top: var(--spacing--sm);
 }
 
+.advanced-toggle {
+  background: none;
+  border: none;
+  color: var(--color--text--tint-1);
+  font-size: var(--font-size--xs);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing--3xs);
+  padding: var(--spacing--2xs) 0;
+  align-self: center;
+
+  ion-icon {
+    font-size: var(--font-size--sm);
+  }
+
+  &:hover {
+    color: var(--color--text);
+  }
+}
+
+.advanced-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing--xs);
+  padding: var(--spacing--sm);
+  background: var(--n8n-desk--surface-bg);
+  border: 1px solid var(--border-color--subtle);
+  border-radius: var(--radius--sm);
+}
+
+.advanced-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.advanced-label {
+  font-size: var(--font-size--sm);
+  color: var(--color--text);
+}
+
+.mcp-hint {
+  margin: 0;
+  font-size: var(--font-size--2xs);
+  color: var(--color--text--tint-1);
+  line-height: 1.4;
+}
+
 // Step 2
 .credentials-header {
   display: flex;
@@ -599,6 +802,23 @@ function goBackToStep2(): void {
   p {
     margin: 0;
     font-size: var(--font-size--sm);
+  }
+}
+
+.privacy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing--3xs);
+  margin: var(--spacing--2xs) 0 0 0;
+  font-size: var(--font-size--2xs);
+  color: var(--color--text--tint-1);
+  line-height: 1.5;
+  text-align: left;
+
+  ion-icon {
+    flex-shrink: 0;
+    font-size: var(--font-size--xs);
+    margin-top: 2px;
   }
 }
 

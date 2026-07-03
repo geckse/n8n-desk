@@ -12,7 +12,7 @@ import { buildCoworkPolicy, buildWorkflowPolicy } from '../agent/sandbox-policy'
 import { createFileTools } from '../agent/file-tools'
 import { jsComputeTool } from '../agent/js-sandbox'
 import { WORKFLOW_MODE_SYSTEM_PROMPT, COWORK_MODE_SYSTEM_PROMPT } from '../agent/system-prompts'
-import { callTool } from '../mcp-client'
+import { callToolWithUrl } from '../mcp-client'
 
 const BASE_DIR = path.join(os.homedir(), '.n8n-desk')
 
@@ -56,10 +56,21 @@ interface StoredTokens {
   refresh_token: string
 }
 
-async function readTokens(instanceId: string): Promise<StoredTokens | null> {
+type TokenKind = 'n8n' | 'mcp'
+
+function tokensPath(instanceId: string, kind: TokenKind): string {
+  const file = kind === 'n8n' ? 'tokens.enc' : 'mcp-tokens.enc'
+  return path.join(BASE_DIR, 'instances', instanceId, file)
+}
+
+function authMetaPath(instanceId: string, kind: TokenKind): string {
+  const file = kind === 'n8n' ? 'auth.json' : 'mcp-auth.json'
+  return path.join(BASE_DIR, 'instances', instanceId, file)
+}
+
+async function readTokensFor(instanceId: string, kind: TokenKind): Promise<StoredTokens | null> {
   try {
-    const filePath = path.join(BASE_DIR, 'instances', instanceId, 'tokens.enc')
-    const data = await fs.readFile(filePath)
+    const data = await fs.readFile(tokensPath(instanceId, kind))
 
     let jsonStr: string
     if (safeStorage.isEncryptionAvailable()) {
@@ -74,9 +85,14 @@ async function readTokens(instanceId: string): Promise<StoredTokens | null> {
   }
 }
 
-async function storeTokens(instanceId: string, accessToken: string, refreshToken: string): Promise<void> {
+async function storeTokensFor(
+  instanceId: string,
+  kind: TokenKind,
+  accessToken: string,
+  refreshToken: string,
+): Promise<void> {
   const tokenData = JSON.stringify({ access_token: accessToken, refresh_token: refreshToken })
-  const filePath = path.join(BASE_DIR, 'instances', instanceId, 'tokens.enc')
+  const filePath = tokensPath(instanceId, kind)
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
 
   if (safeStorage.isEncryptionAvailable()) {
@@ -100,61 +116,111 @@ interface AuthMetadata {
 }
 
 /**
- * Read the active instance config and get a valid access token.
- * Auto-refreshes the token if it has expired.
- * Returns instanceId alongside url/accessToken so callers can scope
- * plugin/server resolution to the correct instance.
+ * Load tokens for a given kind and refresh proactively if within 60s of expiry.
+ * Returns the (possibly refreshed) access token or null if unavailable.
  */
-async function readActiveInstanceConfig(): Promise<{ instanceId: string; url: string; accessToken: string } | null> {
-  const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
-  if (!config?.defaultInstanceId) return null
-
-  const instanceId = config.defaultInstanceId
-  const instance = await readJson<{ url: string }>(
-    path.join(BASE_DIR, 'instances', instanceId, 'instance.json')
-  )
-  if (!instance?.url) return null
-
-  // Read actual tokens from encrypted storage
-  let tokens = await readTokens(instanceId)
+async function loadAndRefresh(instanceId: string, kind: TokenKind): Promise<string | null> {
+  let tokens = await readTokensFor(instanceId, kind)
   if (!tokens?.access_token) return null
 
-  // Check if token is expired and refresh if needed
-  const authMeta = await readJson<AuthMetadata>(
-    path.join(BASE_DIR, 'instances', instanceId, 'auth.json')
-  )
-  if (authMeta?.expiresAt) {
+  const authMeta = await readJson<AuthMetadata>(authMetaPath(instanceId, kind))
+  if (authMeta?.expiresAt && authMeta.clientId && authMeta.serverMetadata) {
     const expiresAt = new Date(authMeta.expiresAt).getTime()
     const now = Date.now()
-    // Refresh if expired or within 60 seconds of expiry
     if (now >= expiresAt - 60_000) {
       try {
-        console.log('[n8n-desk] Access token expired, refreshing...')
+        console.log(`[n8n-desk] ${kind} access token expired, refreshing...`)
         const tokenResponse = await refreshTokens(
           authMeta.serverMetadata as Parameters<typeof refreshTokens>[0],
           authMeta.clientId,
           tokens.refresh_token,
         )
-        // Store new tokens
-        await storeTokens(instanceId, tokenResponse.access_token, tokenResponse.refresh_token)
-        // Update expiry in auth.json
+        await storeTokensFor(instanceId, kind, tokenResponse.access_token, tokenResponse.refresh_token)
         authMeta.expiresAt = new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString()
-        await writeJson(path.join(BASE_DIR, 'instances', instanceId, 'auth.json'), authMeta)
+        await writeJson(authMetaPath(instanceId, kind), authMeta)
         tokens = { access_token: tokenResponse.access_token, refresh_token: tokenResponse.refresh_token }
-        console.log('[n8n-desk] Token refreshed successfully')
+        console.log(`[n8n-desk] ${kind} token refreshed successfully`)
       } catch (err) {
-        console.error('[n8n-desk] Token refresh failed:', err)
-        // Return the expired token anyway — the MCP server will return 401
-        // and the user will need to re-authenticate
+        console.error(`[n8n-desk] ${kind} token refresh failed:`, err)
+        // Return the expired token anyway — the server will return 401 and the
+        // renderer will surface the re-auth prompt.
       }
     }
   }
 
-  console.log('[n8n-desk] Instance config loaded, token present:', !!tokens.access_token, 'length:', tokens.access_token.length)
+  return tokens.access_token
+}
+
+/** Thrown by readActiveInstanceConfig when a custom MCP URL is configured but not yet authorized. */
+export class CustomMcpNotAuthorizedError extends Error {
+  constructor(public readonly instanceId: string) {
+    super('Custom MCP server is configured but not authorized. Sign in from Settings → Instances.')
+    this.name = 'CustomMcpNotAuthorizedError'
+  }
+}
+
+export interface ActiveInstanceConfig {
+  instanceId: string
+  url: string
+  accessToken: string
+  mcp: {
+    url: string
+    accessToken: string
+    isCustom: boolean
+  }
+}
+
+/**
+ * Read the active instance config and resolve tokens for both the n8n instance
+ * (REST + cookie context) and the MCP server (default: `${url}/mcp-server/http`
+ * with the n8n OAuth token; custom: `mcpServerUrl` with its own OAuth token).
+ *
+ * Auto-refreshes both tokens if within 60s of expiry.
+ *
+ * Throws CustomMcpNotAuthorizedError when the instance has a `mcpServerUrl`
+ * configured but no MCP tokens on disk — callers should emit an actionable
+ * error event to the renderer.
+ */
+async function readActiveInstanceConfig(): Promise<ActiveInstanceConfig | null> {
+  const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
+  if (!config?.defaultInstanceId) return null
+
+  const instanceId = config.defaultInstanceId
+  const instance = await readJson<{ url: string; mcpServerUrl?: string }>(
+    path.join(BASE_DIR, 'instances', instanceId, 'instance.json')
+  )
+  if (!instance?.url) return null
+
+  const n8nAccessToken = await loadAndRefresh(instanceId, 'n8n')
+  if (!n8nAccessToken) return null
+
+  let mcpUrl: string
+  let mcpAccessToken: string
+  let isCustom = false
+
+  if (instance.mcpServerUrl) {
+    const customMcpToken = await loadAndRefresh(instanceId, 'mcp')
+    if (!customMcpToken) {
+      throw new CustomMcpNotAuthorizedError(instanceId)
+    }
+    mcpUrl = instance.mcpServerUrl.replace(/\/+$/, '')
+    mcpAccessToken = customMcpToken
+    isCustom = true
+  } else {
+    mcpUrl = `${instance.url.replace(/\/+$/, '')}/mcp-server/http`
+    mcpAccessToken = n8nAccessToken
+  }
+
+  console.log('[n8n-desk] Instance config loaded, mcp.isCustom:', isCustom, 'mcp.url:', mcpUrl)
   return {
     instanceId,
     url: instance.url,
-    accessToken: tokens.access_token,
+    accessToken: n8nAccessToken,
+    mcp: {
+      url: mcpUrl,
+      accessToken: mcpAccessToken,
+      isCustom,
+    },
   }
 }
 
@@ -287,17 +353,21 @@ function extractWorkflowMetadata(result: unknown): { workflowId: string; name: s
 }
 
 /**
- * Fetch full workflow JSON via the n8n MCP server's get_workflow_details tool.
- * Uses the MCP OAuth token (same auth as the agent), so it works regardless
- * of whether a session cookie exists.
+ * Fetch full workflow JSON via the MCP server's get_workflow_details tool.
+ * Uses the resolved MCP URL + MCP OAuth token (default n8n MCP or custom).
  */
 async function fetchWorkflowViaMcp(
-  instanceUrl: string,
-  accessToken: string,
+  mcpUrl: string,
+  mcpAccessToken: string,
   workflowId: string,
 ): Promise<Record<string, unknown> | null> {
   try {
-    const result = await callTool(instanceUrl, accessToken, 'get_workflow_details', { workflowId })
+    const result = await callToolWithUrl(
+      mcpUrl,
+      { Authorization: `Bearer ${mcpAccessToken}` },
+      'get_workflow_details',
+      { workflowId },
+    )
 
     // MCP result: { content: [{ type: "text", text: "..." }] }
     if (result.isError) {
@@ -469,7 +539,26 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       }
 
       // Read instance config for MCP connection
-      const instanceConfig = await readActiveInstanceConfig()
+      let instanceConfig: ActiveInstanceConfig | null
+      try {
+        instanceConfig = await readActiveInstanceConfig()
+      } catch (err) {
+        if (err instanceof CustomMcpNotAuthorizedError) {
+          const errorEvent: AgentStreamEvent = {
+            sessionId,
+            type: 'error',
+            data: {
+              message: 'Custom MCP server is configured but not authorized. Open Settings → Instances to sign in.',
+              code: 'CUSTOM_MCP_NOT_AUTHORIZED',
+            },
+          }
+          mainWindow.webContents.send('agent:event', errorEvent)
+          const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'error' } }
+          mainWindow.webContents.send('agent:event', doneEvent)
+          return { success: false, error: 'Custom MCP not authorized' }
+        }
+        throw err
+      }
       if (!instanceConfig) {
         const errorEvent: AgentStreamEvent = {
           sessionId,
@@ -619,6 +708,8 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       const runnerConfig: AgentRunnerConfig = {
         instanceUrl: instanceConfig.url,
         accessToken: instanceConfig.accessToken,
+        mcpUrl: instanceConfig.mcp.url,
+        mcpAccessToken: instanceConfig.mcp.accessToken,
         llmConfig,
         systemPrompt: augmentedPrompt,
         interruptOnTools,
@@ -664,8 +755,8 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
                 if (meta) {
                   console.log(`[n8n-desk] Found workflow metadata in tool result (tool=${event.data.name}): workflowId=${meta.workflowId}`)
                   void fetchWorkflowViaMcp(
-                    instanceConfig.url,
-                    instanceConfig.accessToken,
+                    instanceConfig.mcp.url,
+                    instanceConfig.mcp.accessToken,
                     meta.workflowId,
                   ).then((workflow) => {
                     if (!workflow || active.stopped) return

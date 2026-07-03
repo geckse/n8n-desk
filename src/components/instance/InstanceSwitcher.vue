@@ -2,13 +2,15 @@
 import {
   IonPopover, IonList, IonItem, IonLabel, IonIcon,
 } from '@ionic/vue'
-import { checkmark, addOutline } from 'ionicons/icons'
+import { checkmark, addOutline, createOutline } from 'ionicons/icons'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useInstancesStore } from '@/stores/instances'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkflowSessionsStore } from '@/stores/workflow-sessions'
 import { useCoworkSessionsStore } from '@/stores/cowork-sessions'
+import InstanceEditModal from './InstanceEditModal.vue'
 
 defineProps<{
   trigger?: string
@@ -22,6 +24,16 @@ const workflowSessionsStore = useWorkflowSessionsStore()
 const coworkSessionsStore = useCoworkSessionsStore()
 
 const popover = defineModel<boolean>('isOpen', { default: false })
+
+const editModalOpen = ref(false)
+const editTargetId = ref<string | null>(null)
+
+function openEdit(event: Event, instanceId: string): void {
+  event.stopPropagation()
+  editTargetId.value = instanceId
+  editModalOpen.value = true
+  popover.value = false
+}
 
 async function switchTo(instanceId: string): Promise<void> {
   if (instanceId === instancesStore.activeInstanceId) {
@@ -81,6 +93,14 @@ function getHostname(url: string): string {
           <h3>{{ instance.label }}</h3>
           <p>{{ getHostname(instance.url) }}</p>
         </ion-label>
+        <button
+          type="button"
+          class="edit-button"
+          :aria-label="t('settings.instances.editInstance')"
+          @click.stop="openEdit($event, instance.id)"
+        >
+          <ion-icon :icon="createOutline" />
+        </button>
         <ion-icon
           v-if="instance.id === instancesStore.activeInstanceId"
           :icon="checkmark"
@@ -95,6 +115,11 @@ function getHostname(url: string): string {
       </ion-item>
     </ion-list>
   </ion-popover>
+
+  <instance-edit-modal
+    v-model:is-open="editModalOpen"
+    :instance-id="editTargetId"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -127,5 +152,26 @@ function getHostname(url: string): string {
 .add-instance-item {
   --min-height: 40px;
   border-top: 1px solid var(--border-color--subtle);
+}
+
+.edit-button {
+  background: none;
+  border: none;
+  padding: var(--spacing--3xs);
+  margin-right: var(--spacing--2xs);
+  color: var(--color--text--tint-1);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius--sm);
+
+  &:hover {
+    color: var(--color--primary);
+    background: var(--n8n-desk--surface-raised-bg);
+  }
+
+  ion-icon {
+    font-size: var(--font-size--md);
+  }
 }
 </style>

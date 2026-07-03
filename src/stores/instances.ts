@@ -78,14 +78,26 @@ export const useInstancesStore = defineStore('instances', () => {
     }
   }
 
-  async function updateInstance(id: string, updates: Partial<Pick<Instance, 'label' | 'color'>>): Promise<void> {
+  async function updateInstance(
+    id: string,
+    updates: Partial<Pick<Instance, 'label' | 'color' | 'mcpServerUrl'>>,
+  ): Promise<void> {
     const idx = instances.value.findIndex((i) => i.id === id)
     if (idx === -1) return
 
-    const updated = { ...instances.value[idx], ...updates }
+    // Merge, then strip an explicitly-undefined mcpServerUrl so callers can
+    // remove the override by passing `mcpServerUrl: undefined`.
+    const updated: Instance = { ...instances.value[idx], ...updates }
+    if ('mcpServerUrl' in updates && updates.mcpServerUrl === undefined) {
+      delete updated.mcpServerUrl
+    }
     instances.value[idx] = updated
 
     await localStorageService.writeJson(instancePath(id, 'instance.json'), updated)
+  }
+
+  function getInstance(id: string): Instance | null {
+    return instances.value.find((i) => i.id === id) ?? null
   }
 
   async function removeInstance(id: string): Promise<void> {
@@ -128,6 +140,7 @@ export const useInstancesStore = defineStore('instances', () => {
     reset,
     addInstance,
     updateInstance,
+    getInstance,
     removeInstance,
     setActive,
   }

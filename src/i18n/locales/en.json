@@ -72,7 +72,37 @@
     "instanceUrl": "Instance URL",
     "instanceColor": "Color",
     "disconnectInstance": "Disconnect Instance",
-    "disconnectDescription": "This will revoke your access tokens and remove this instance from n8n-desk. You can reconnect at any time."
+    "disconnectDescription": "This will revoke your access tokens and remove this instance from n8n-desk. You can reconnect at any time.",
+    "instances": {
+      "title": "Instances",
+      "description": "Manage your connected n8n instances.",
+      "empty": "No instances connected.",
+      "addInstance": "Add instance",
+      "customMcpBadge": "Custom MCP",
+      "editInstance": "Edit instance"
+    },
+    "mcpServer": {
+      "title": "Custom MCP server",
+      "description": "By default, this instance uses n8n's built-in MCP server. Override with a custom URL if you host your own.",
+      "urlLabel": "Custom MCP server URL",
+      "urlPlaceholder": "https://mcp.example.com",
+      "urlHelp": "The URL must support OAuth 2.0 discovery at /.well-known/oauth-authorization-server.",
+      "statusNotConfigured": "Using default n8n MCP server",
+      "statusUnauthorized": "Configured, not authorized",
+      "statusConnected": "Connected",
+      "statusChecking": "Checking connection…",
+      "signIn": "Sign in to MCP server",
+      "signOut": "Sign out of MCP server",
+      "testConnection": "Test connection",
+      "testSuccess": "Reached MCP server ({count} tools discovered)",
+      "testFailed": "Test failed: {error}",
+      "resetToDefault": "Reset to default n8n MCP server",
+      "changeConfirmTitle": "Sign out of current MCP server?",
+      "changeConfirmMessage": "Changing the URL will sign you out of the current MCP server. You'll need to sign in again.",
+      "changeConfirmProceed": "Change URL",
+      "changeConfirmCancel": "Cancel",
+      "backgroundValidationFailed": "MCP server unreachable — agent will fail until you sign in again."
+    }
   },
   "settingsModal": {
     "cancel": "Cancel",
@@ -114,6 +144,16 @@
     "discoveringAgents": "Discovering agents...",
     "foundAgents": "Found {count} agent | Found {count} agents",
     "getStarted": "Get started",
+    "advancedOptions": "Advanced options",
+    "useCustomMcp": "Use a custom MCP server",
+    "mcpUrlLabel": "Custom MCP server URL",
+    "mcpUrlPlaceholder": "https://mcp.example.com",
+    "mcpUrlHelp": "The URL must support OAuth 2.0 discovery. Leave the toggle off to use the default n8n MCP server.",
+    "stepMcpAuth": "MCP",
+    "stepMcpAuthTitle": "Sign in to the custom MCP server",
+    "mcpAuthHelp": "This custom MCP server has its own OAuth flow. A browser window will open for you to authorize.",
+    "mcpConfigureLater": "Configure later",
+    "mcpAuthorizing": "Authorizing with {hostname}...",
     "errors": {
       "invalidUrl": "Enter a valid URL (e.g., https://n8n.company.com)",
       "unreachable": "Can't reach this URL. Check the address and try again.",
@@ -121,7 +161,9 @@
       "authFailed": "Authorization failed. Please try again.",
       "authCancelled": "Authorization was cancelled.",
       "authTimeout": "Authorization timed out. Please try again.",
-      "credentialsFailed": "Sign-in failed. Check your credentials and try again."
+      "credentialsFailed": "Sign-in failed. Check your credentials and try again.",
+      "mcpDiscoveryFailed": "This URL doesn't appear to be an OAuth-compatible MCP server.",
+      "mcpAuthFailed": "MCP server authorization failed. Please try again."
     }
   },
   "reLogin": {
@@ -129,7 +171,8 @@
     "description": "Your session with {instance} has expired. Sign in again to continue.",
     "signInButton": "Sign in",
     "signingIn": "Signing in...",
-    "error": "Sign-in failed. Check your credentials and try again."
+    "error": "Sign-in failed. Check your credentials and try again.",
+    "privacyNote": "n8n-desk doesn't store your password. Your credentials are sent directly to your n8n instance to obtain a session token."
   },
   "chat": {
     "input": {

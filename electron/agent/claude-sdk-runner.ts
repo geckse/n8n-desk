@@ -143,18 +143,18 @@ export class ClaudeSdkRunner implements AgentRunner {
       return { behavior: 'deny' as const, message: `User rejected ${toolName}` }
     }
 
-    // Configure the MCP server pointing to n8n's endpoint
-    const mcpServerUrl = `${config.instanceUrl.replace(/\/$/, '')}/mcp-server/http`
+    // Use the resolved MCP endpoint + token (default n8n MCP or per-instance custom override)
+    const mcpServerUrl = config.mcpUrl
 
     // Build the MCP servers map: n8n entry + any custom servers from plugins/standalone.
-    // Credential isolation: n8n Bearer token only in the 'n8n' entry, each custom server
+    // Credential isolation: MCP Bearer token only in the 'n8n' entry, each custom server
     // only gets its own headers. Server names must be unique — 'n8n' is reserved.
     const mcpServers: Record<string, { type: 'http'; url: string; headers: Record<string, string> }> = {
       'n8n': {
         type: 'http',
         url: mcpServerUrl,
         headers: {
-          Authorization: `Bearer ${config.accessToken}`,
+          Authorization: `Bearer ${config.mcpAccessToken}`,
         },
       },
     }

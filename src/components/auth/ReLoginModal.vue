@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { IonInput, IonButton, IonSpinner } from '@ionic/vue'
+import { IonInput, IonButton, IonSpinner, IonIcon } from '@ionic/vue'
+import { lockClosed } from 'ionicons/icons'
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -121,6 +122,11 @@ async function submit(): Promise<void> {
             <ion-spinner v-if="isLoading" name="crescent" />
             <span v-else>{{ t('reLogin.signInButton') }}</span>
           </ion-button>
+
+          <p class="relogin-privacy-note">
+            <ion-icon :icon="lockClosed" aria-hidden="true" />
+            <span>{{ t('reLogin.privacyNote') }}</span>
+          </p>
         </form>
       </div>
     </div>
@@ -173,5 +179,21 @@ async function submit(): Promise<void> {
   color: var(--color--danger);
   font-size: var(--font-size--2xs);
   margin: 0;
+}
+
+.relogin-privacy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing--3xs);
+  font-size: var(--font-size--2xs);
+  color: var(--color--text--tint-1);
+  line-height: 1.5;
+  margin: var(--spacing--2xs) 0 0 0;
+
+  ion-icon {
+    flex-shrink: 0;
+    font-size: var(--font-size--xs);
+    margin-top: 2px;
+  }
 }
 </style>

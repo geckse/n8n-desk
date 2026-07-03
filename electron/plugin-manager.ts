@@ -198,19 +198,21 @@ async function deleteSecret(key: string): Promise<void> {
  * Supports github (raw.githubusercontent.com), url (direct fetch), and local (file read).
  */
 async function fetchMarketplaceJson(source: MarketplaceSource): Promise<RawMarketplaceJson> {
-  let fetchUrl: string
-
   switch (source.source) {
     case 'github': {
       if (!source.repo) throw new Error('GitHub marketplace source requires a repo field')
       const ref = source.ref || 'main'
-      fetchUrl = `https://raw.githubusercontent.com/${source.repo}/${ref}/marketplace.json`
-      break
+      const base = `https://raw.githubusercontent.com/${source.repo}/${ref}`
+      // Claude plugin marketplaces store their manifest at .claude-plugin/marketplace.json
+      // (the spec location); fall back to a root-level marketplace.json for older layouts.
+      return fetchMarketplaceJsonFromUrls([
+        `${base}/.claude-plugin/marketplace.json`,
+        `${base}/marketplace.json`,
+      ])
     }
     case 'url': {
       if (!source.url) throw new Error('URL marketplace source requires a url field')
-      fetchUrl = source.url
-      break
+      return fetchMarketplaceJsonFromUrls([source.url])
     }
     case 'local': {
       if (!source.url) throw new Error('Local marketplace source requires a url field (local path)')
@@ -220,12 +222,22 @@ async function fetchMarketplaceJson(source: MarketplaceSource): Promise<RawMarke
     default:
       throw new Error(`Unsupported marketplace source type: ${source.source}`)
   }
+}
 
-  const res = await fetch(fetchUrl)
-  if (!res.ok) {
-    throw new Error(`Failed to fetch marketplace: ${res.status} ${res.statusText}`)
+/**
+ * Fetch marketplace.json from a list of candidate URLs, trying each in order.
+ * Returns the first that responds 200. Throws with the last status if all fail.
+ */
+async function fetchMarketplaceJsonFromUrls(urls: string[]): Promise<RawMarketplaceJson> {
+  let lastError = 'Failed to fetch marketplace'
+  for (const url of urls) {
+    const res = await fetch(url)
+    if (res.ok) {
+      return (await res.json()) as RawMarketplaceJson
+    }
+    lastError = `Failed to fetch marketplace: ${res.status} ${res.statusText}`
   }
-  return (await res.json()) as RawMarketplaceJson
+  throw new Error(lastError)
 }
 
 // --- Plugin Source Resolution ---

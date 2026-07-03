@@ -43,6 +43,18 @@ contextBridge.exposeInMainWorld('n8nDesk', {
       ipcRenderer.invoke('auth:get-browser-id', instanceId),
     syncCookie: (instanceId: string) =>
       ipcRenderer.invoke('auth:sync-cookie', instanceId),
+    mcp: {
+      validate: (mcpUrl: string) =>
+        ipcRenderer.invoke('auth:mcp-validate', mcpUrl),
+      login: (instanceId: string, mcpUrl: string, options?: { forceLocalhost?: boolean }) =>
+        ipcRenderer.invoke('auth:mcp-login', instanceId, mcpUrl, options),
+      logout: (instanceId: string) =>
+        ipcRenderer.invoke('auth:mcp-logout', instanceId),
+      refresh: (instanceId: string) =>
+        ipcRenderer.invoke('auth:mcp-refresh', instanceId),
+      clearUrl: (instanceId: string) =>
+        ipcRenderer.invoke('auth:mcp-clear-url', instanceId),
+    },
   },
   api: {
     fetch: (url: string, options?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }) =>

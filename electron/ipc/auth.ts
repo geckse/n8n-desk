@@ -145,6 +145,55 @@ async function deleteTokens(instanceId: string): Promise<void> {
   }
 }
 
+// --- Custom MCP OAuth storage (mirrors tokens.enc + auth.json but for custom MCP servers) ---
+
+async function storeMcpTokens(instanceId: string, accessToken: string, refreshToken: string): Promise<void> {
+  const tokenData = JSON.stringify({ access_token: accessToken, refresh_token: refreshToken })
+  const filePath = path.join(instanceDir(instanceId), 'mcp-tokens.enc')
+  await ensureDir(path.dirname(filePath))
+
+  if (safeStorage.isEncryptionAvailable()) {
+    const encrypted = safeStorage.encryptString(tokenData)
+    await fs.writeFile(filePath, encrypted, { mode: 0o600 })
+  } else {
+    await fs.writeFile(filePath, tokenData, { encoding: 'utf-8', mode: 0o600 })
+  }
+}
+
+async function readMcpTokens(instanceId: string): Promise<{ access_token: string; refresh_token: string } | null> {
+  try {
+    const filePath = path.join(instanceDir(instanceId), 'mcp-tokens.enc')
+    const data = await fs.readFile(filePath)
+
+    let jsonStr: string
+    if (safeStorage.isEncryptionAvailable()) {
+      jsonStr = safeStorage.decryptString(data)
+    } else {
+      jsonStr = data.toString('utf-8')
+    }
+
+    return JSON.parse(jsonStr) as { access_token: string; refresh_token: string }
+  } catch {
+    return null
+  }
+}
+
+async function deleteMcpTokens(instanceId: string): Promise<void> {
+  try {
+    await fs.unlink(path.join(instanceDir(instanceId), 'mcp-tokens.enc'))
+  } catch {
+    // Already deleted
+  }
+}
+
+async function deleteMcpAuthMeta(instanceId: string): Promise<void> {
+  try {
+    await fs.unlink(path.join(instanceDir(instanceId), 'mcp-auth.json'))
+  } catch {
+    // Already deleted
+  }
+}
+
 async function readSessionToken(instanceId: string): Promise<string | null> {
   try {
     const filePath = path.join(instanceDir(instanceId), 'session.enc')
@@ -717,5 +766,247 @@ export function registerAuthHandlers(): void {
       }
     },
   )
+
+  // --- auth:mcp-validate ---
+  // Probe a custom MCP URL for its OAuth discovery document. No disk writes;
+  // used for live form validation before the user commits to signing in.
+  ipcMain.handle('auth:mcp-validate', async (_event, mcpUrl: string): Promise<{
+    success: boolean
+    hasOAuthSupport?: boolean
+    serverMetadata?: OAuthServerMetadata
+    error?: string
+    errorCode?: string
+  }> => {
+    try {
+      const url = mcpUrl.replace(/\/+$/, '')
+      try {
+        new URL(url)
+      } catch {
+        return { success: false, error: 'Invalid URL format.', errorCode: 'invalid_url' }
+      }
+
+      try {
+        const metadata = await discoverServer(url)
+        return { success: true, hasOAuthSupport: true, serverMetadata: metadata }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Discovery failed'
+        return {
+          success: false,
+          hasOAuthSupport: false,
+          error: `Not an OAuth-compatible MCP server: ${message}`,
+          errorCode: 'discovery_failed',
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      return { success: false, error: message, errorCode: 'network_error' }
+    }
+  })
+
+  // --- auth:mcp-login ---
+  // Full PKCE OAuth flow against a custom MCP URL. On success, persists
+  // mcpServerUrl to instance.json and writes mcp-auth.json + mcp-tokens.enc.
+  ipcMain.handle('auth:mcp-login', async (
+    _event,
+    instanceId: string,
+    mcpUrl: string,
+    options?: { forceLocalhost?: boolean },
+  ): Promise<AuthLoginResult> => {
+    try {
+      const url = mcpUrl.replace(/\/+$/, '')
+      const instDir = instanceDir(instanceId)
+
+      // Instance must exist — MCP login is always in the context of an existing instance
+      const existingInstance = await readJson<{ url: string; label?: string; color?: string; addedAt?: string }>(
+        path.join(instDir, 'instance.json'),
+      )
+      if (!existingInstance?.url) {
+        return { success: false, error: 'Instance not found. Add the instance first.', errorCode: 'network_error' }
+      }
+
+      let metadata
+      try {
+        metadata = await discoverServer(url)
+      } catch {
+        return {
+          success: false,
+          error: `Cannot reach MCP server at ${url}. Check the URL and try again.`,
+          errorCode: 'discovery_failed',
+        }
+      }
+
+      const listener = await startOAuthRedirectListener({ forceLocalhost: options?.forceLocalhost })
+
+      try {
+        let clientInfo
+        try {
+          clientInfo = await registerClient(metadata, listener.redirectUri)
+        } catch {
+          listener.cleanup()
+          return {
+            success: false,
+            error: 'Failed to register with the MCP server. It may not support dynamic client registration.',
+            errorCode: 'registration_failed',
+          }
+        }
+
+        const codeVerifier = generateCodeVerifier()
+        const state = generateState()
+
+        const authUrl = buildAuthorizationUrl(
+          metadata,
+          clientInfo.client_id,
+          listener.redirectUri,
+          state,
+          codeVerifier,
+          { requestAllScopes: true },
+        )
+
+        await shell.openExternal(authUrl)
+
+        let callback
+        try {
+          callback = await listener.waitForCallback()
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Unknown error'
+          if (message.includes('timed out')) {
+            return { success: false, error: 'Authentication timed out. Please try again.', errorCode: 'auth_timeout' }
+          }
+          if (message.includes('OAuth error')) {
+            return { success: false, error: message, errorCode: 'auth_cancelled' }
+          }
+          return { success: false, error: message, errorCode: 'auth_cancelled' }
+        }
+
+        if (callback.state !== state) {
+          return { success: false, error: 'State mismatch — possible CSRF attack. Please try again.', errorCode: 'auth_cancelled' }
+        }
+
+        let tokenResponse
+        try {
+          tokenResponse = await exchangeCodeForTokens(
+            metadata,
+            clientInfo.client_id,
+            callback.code,
+            listener.redirectUri,
+            codeVerifier,
+          )
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Token exchange failed'
+          return { success: false, error: message, errorCode: 'token_exchange_failed' }
+        }
+
+        const scopes = tokenResponse.scope ? tokenResponse.scope.split(' ') : metadata.scopes_supported || []
+        const userRole = detectRole(scopes)
+        const expiresAt = computeExpiresAt(tokenResponse.expires_in)
+
+        await storeMcpTokens(instanceId, tokenResponse.access_token, tokenResponse.refresh_token)
+
+        // Write mcp-auth.json (mirrors AuthMetadata shape but for the custom MCP OAuth context)
+        const mcpAuthMeta: AuthMetadata = {
+          clientId: clientInfo.client_id,
+          clientName: 'n8n-desk',
+          scopes,
+          expiresAt,
+          userRole,
+          registeredAt: new Date().toISOString(),
+          serverMetadata: metadata,
+        }
+        await writeJson(path.join(instDir, 'mcp-auth.json'), mcpAuthMeta)
+
+        // Persist mcpServerUrl to instance.json
+        const updatedInstance = { ...existingInstance, url: existingInstance.url, mcpServerUrl: url }
+        await writeJson(path.join(instDir, 'instance.json'), updatedInstance)
+
+        return { success: true, instanceId, userRole, scopes, expiresAt }
+      } finally {
+        listener.cleanup()
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      return { success: false, error: message, errorCode: 'network_error' }
+    }
+  })
+
+  // --- auth:mcp-logout ---
+  // Revoke MCP tokens (best-effort) and delete mcp-tokens.enc + mcp-auth.json.
+  // Leaves mcpServerUrl in instance.json so the user can re-auth without retyping.
+  ipcMain.handle('auth:mcp-logout', async (_event, instanceId: string): Promise<void> => {
+    const instDir = instanceDir(instanceId)
+
+    const mcpAuthMeta = await readJson<AuthMetadata>(path.join(instDir, 'mcp-auth.json'))
+    const tokens = await readMcpTokens(instanceId)
+
+    if (mcpAuthMeta && tokens && mcpAuthMeta.serverMetadata && mcpAuthMeta.clientId) {
+      await revokeToken(mcpAuthMeta.serverMetadata, mcpAuthMeta.clientId, tokens.access_token, 'access_token')
+      await revokeToken(mcpAuthMeta.serverMetadata, mcpAuthMeta.clientId, tokens.refresh_token, 'refresh_token')
+    }
+
+    await deleteMcpTokens(instanceId)
+    await deleteMcpAuthMeta(instanceId)
+  })
+
+  // --- auth:mcp-refresh ---
+  // Refresh custom MCP OAuth tokens. Mirrors auth:refresh for the MCP context.
+  ipcMain.handle('auth:mcp-refresh', async (_event, instanceId: string): Promise<AuthRefreshResult> => {
+    try {
+      const instDir = instanceDir(instanceId)
+      const mcpAuthMeta = await readJson<AuthMetadata>(path.join(instDir, 'mcp-auth.json'))
+      const tokens = await readMcpTokens(instanceId)
+
+      if (!mcpAuthMeta || !tokens) {
+        return { success: false, error: 'No MCP auth data found. Please sign in to the MCP server again.' }
+      }
+
+      if (!mcpAuthMeta.serverMetadata || !mcpAuthMeta.clientId) {
+        return { success: false, error: 'Incomplete MCP auth metadata.' }
+      }
+
+      const tokenResponse = await refreshTokens(mcpAuthMeta.serverMetadata, mcpAuthMeta.clientId, tokens.refresh_token)
+
+      await storeMcpTokens(instanceId, tokenResponse.access_token, tokenResponse.refresh_token)
+
+      const expiresAt = computeExpiresAt(tokenResponse.expires_in)
+      mcpAuthMeta.expiresAt = expiresAt
+      await writeJson(path.join(instDir, 'mcp-auth.json'), mcpAuthMeta)
+
+      return { success: true, expiresAt, accessToken: tokenResponse.access_token }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'MCP token refresh failed'
+      return { success: false, error: message }
+    }
+  })
+
+  // --- auth:mcp-clear-url ---
+  // Clear the custom MCP override: revoke + delete MCP tokens, delete mcp-auth.json,
+  // and remove mcpServerUrl from instance.json. The instance reverts to the default
+  // `${url}/mcp-server/http` endpoint on the next agent run.
+  ipcMain.handle('auth:mcp-clear-url', async (_event, instanceId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const instDir = instanceDir(instanceId)
+
+      // Revoke + delete tokens (same as mcp-logout)
+      const mcpAuthMeta = await readJson<AuthMetadata>(path.join(instDir, 'mcp-auth.json'))
+      const tokens = await readMcpTokens(instanceId)
+      if (mcpAuthMeta && tokens && mcpAuthMeta.serverMetadata && mcpAuthMeta.clientId) {
+        await revokeToken(mcpAuthMeta.serverMetadata, mcpAuthMeta.clientId, tokens.access_token, 'access_token')
+        await revokeToken(mcpAuthMeta.serverMetadata, mcpAuthMeta.clientId, tokens.refresh_token, 'refresh_token')
+      }
+      await deleteMcpTokens(instanceId)
+      await deleteMcpAuthMeta(instanceId)
+
+      // Remove mcpServerUrl from instance.json
+      const existingInstance = await readJson<Record<string, unknown>>(path.join(instDir, 'instance.json'))
+      if (existingInstance) {
+        delete existingInstance.mcpServerUrl
+        await writeJson(path.join(instDir, 'instance.json'), existingInstance)
+      }
+
+      return { success: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to clear MCP override'
+      return { success: false, error: message }
+    }
+  })
 }
 

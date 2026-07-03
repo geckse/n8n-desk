@@ -44,6 +44,20 @@ interface N8nDeskBridge {
     getSessionToken: (instanceId: string) => Promise<string | null>
     getBrowserId: (instanceId: string) => Promise<string | null>
     syncCookie: (instanceId: string) => Promise<boolean>
+    mcp: {
+      validate: (mcpUrl: string) => Promise<{
+        success: boolean
+        hasOAuthSupport?: boolean
+        serverMetadata?: import('./src/types/auth').OAuthServerMetadata
+        error?: string
+        errorCode?: string
+      }>
+      login: (instanceId: string, mcpUrl: string, options?: { forceLocalhost?: boolean }) =>
+        Promise<import('./src/types/auth').AuthLoginResult>
+      logout: (instanceId: string) => Promise<void>
+      refresh: (instanceId: string) => Promise<import('./src/types/auth').AuthRefreshResult>
+      clearUrl: (instanceId: string) => Promise<{ success: boolean; error?: string }>
+    }
   }
   keychain: {
     get: (key: string) => Promise<string | null>

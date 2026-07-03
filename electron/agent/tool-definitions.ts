@@ -1,12 +1,12 @@
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
-import { callTool, callToolWithUrl, listToolsWithUrl } from '../mcp-client'
+import { callToolWithUrl, listToolsWithUrl } from '../mcp-client'
 
 // --- Types ---
 
 interface McpToolContext {
-  instanceUrl: string
-  accessToken: string
+  mcpUrl: string
+  mcpAccessToken: string
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -22,7 +22,12 @@ function mcpTool(
 ): LangChainTool {
   return tool(
     async (args: Record<string, unknown>) => {
-      const result = await callTool(ctx.instanceUrl, ctx.accessToken, name, args as Record<string, unknown>)
+      const result = await callToolWithUrl(
+        ctx.mcpUrl,
+        { Authorization: `Bearer ${ctx.mcpAccessToken}` },
+        name,
+        args as Record<string, unknown>,
+      )
       if (result.isError) {
         const errorText = result.content
           .map((c) => c.text ?? JSON.stringify(c))
@@ -39,10 +44,10 @@ function mcpTool(
 
 /**
  * Create all 13 LangChain tool wrappers for n8n MCP tools.
- * Each tool calls the n8n MCP server via the mcp-client module.
+ * Each tool calls the resolved MCP server (default n8n MCP or a custom override).
  */
-export function createMcpTools(instanceUrl: string, accessToken: string): LangChainTool[] {
-  const ctx: McpToolContext = { instanceUrl, accessToken }
+export function createMcpTools(mcpUrl: string, mcpAccessToken: string): LangChainTool[] {
+  const ctx: McpToolContext = { mcpUrl, mcpAccessToken }
 
   return [
     // --- Node Discovery ---

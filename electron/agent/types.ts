@@ -134,6 +134,16 @@ export interface FilesystemSandboxPolicy {
 export interface AgentRunnerConfig {
   instanceUrl: string
   accessToken: string
+  /**
+   * Resolved MCP endpoint URL. Either the default `${instanceUrl}/mcp-server/http`
+   * or a per-instance custom MCP server URL. Runners must NOT re-derive the URL.
+   */
+  mcpUrl: string
+  /**
+   * Bearer token to use against `mcpUrl`. Either the n8n OAuth access token (default)
+   * or a separately-issued custom MCP OAuth token.
+   */
+  mcpAccessToken: string
   llmConfig: LlmProviderConfig
   systemPrompt: string
   interruptOnTools?: string[]
