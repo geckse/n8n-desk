@@ -4,7 +4,13 @@ import { build } from 'esbuild'
 // Bundle Electron TypeScript with esbuild
 // Uses CJS output format since Electron's main process requires it
 await build({
-  entryPoints: ['electron/main.ts', 'electron/preload.ts'],
+  entryPoints: {
+    main: 'electron/main.ts',
+    preload: 'electron/preload.ts',
+    // Separate worker bundle — spawned via worker_threads by js-sandbox.ts,
+    // resolved as path.join(__dirname, 'js-sandbox-worker.js') at runtime
+    'js-sandbox-worker': 'electron/agent/js-sandbox-worker.ts',
+  },
   outdir: 'electron/dist',
   bundle: true,
   platform: 'node',

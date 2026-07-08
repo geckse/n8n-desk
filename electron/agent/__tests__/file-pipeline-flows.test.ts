@@ -245,15 +245,15 @@ describe('skills mount round-trip', () => {
     expect(entry).toBeDefined()
   })
 
-  it('read_text on a sibling file under read-only ~/.n8n-desk/ is allowed', async () => {
-    // Write a file in the n8n-desk dir as the test harness (not via the agent),
-    // then verify the agent can read it (n8n-desk is mounted ro for reads).
+  it('read_text outside the skills mount under ~/.n8n-desk/ is rejected', async () => {
+    // Only ~/.n8n-desk/skills/ is mounted — a sibling file at the n8n-desk
+    // root (instances, configs, session data) must be unreachable.
     const siblingPath = path.join(n8nDeskDir, 'global-config.md')
-    await fs.writeFile(siblingPath, '# Read-only public info\n')
+    await fs.writeFile(siblingPath, '# App-internal info\n')
 
     const result = await invoke('read_text', { path: siblingPath })
-    expect(result.success).toBe(true)
-    expect(String(result.content)).toContain('Read-only public info')
+    expect(result.success).toBe(false)
+    expect(String(result.error)).toContain('outside all allowed folders')
   })
 })
 

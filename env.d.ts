@@ -16,8 +16,12 @@ interface N8nDeskBridge {
   agent: {
     invoke: (sessionId: string, message: string, options?: { attachedFolders?: { path: string; label: string; mode: 'ro' | 'rw' }[]; attachedFiles?: string[]; mode?: 'cowork' | 'workflow' }) => Promise<{ success: boolean; error?: string }>
     stop: (sessionId: string) => Promise<{ success: boolean }>
-    approve: (sessionId: string, decision: 'approve' | 'reject') => Promise<{ success: boolean; error?: string }>
+    stopAll: () => Promise<{ success: boolean }>
+    approve: (sessionId: string, approvalId: string, decision: import('./src/types/agent').ApprovalDecision) => Promise<{ success: boolean; error?: string }>
+    answer: (sessionId: string, questionId: string, answers: import('./src/types/agent').AskUserAnswers) => Promise<{ success: boolean; error?: string }>
     testConnection: () => Promise<{ success: boolean; error?: string }>
+    mcpStatus: (instanceId?: string) => Promise<import('./src/types/mcp').McpStatusResult>
+    listMcpTools: (instanceId?: string) => Promise<import('./src/types/mcp').McpToolCatalog>
     onEvent: (callback: (event: import('./src/types/agent').AgentEvent) => void) => () => void
   }
   storage: {

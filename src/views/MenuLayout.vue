@@ -358,9 +358,9 @@ const sidebarStyle = computed(() => ({
       @update:is-open="(v: boolean) => v ? settingsStore.openSettings() : settingsStore.closeSettings()"
     />
 
-    <!-- Re-Login Modal (session expired) -->
+    <!-- Re-Login Modal (session expired or sign-in requested from Settings) -->
     <ReLoginModal
-      :is-open="authStore.sessionExpired"
+      :is-open="authStore.sessionExpired || authStore.reLoginRequested"
       @update:is-open="(v: boolean) => { if (!v) authStore.clearSessionExpired() }"
     />
   </ion-page>

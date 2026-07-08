@@ -11,9 +11,9 @@ describe('ChatInput', () => {
       const wrapper = mount(ChatInput)
       const textarea = wrapper.find('textarea')
       await textarea.setValue('  Hello  ')
-      await wrapper.find('button[aria-label="Send message"]').trigger('click')
+      await wrapper.find('button[aria-label="Send"]').trigger('click')
 
-      expect(wrapper.emitted('send')).toEqual([['Hello', []]])
+      expect(wrapper.emitted('send')).toEqual([['Hello', [], []]])
     })
 
     it('emits send on Enter key', async () => {
@@ -22,7 +22,7 @@ describe('ChatInput', () => {
       await textarea.setValue('Test message')
       await textarea.trigger('keydown', { key: 'Enter', shiftKey: false })
 
-      expect(wrapper.emitted('send')).toEqual([['Test message', []]])
+      expect(wrapper.emitted('send')).toEqual([['Test message', [], []]])
     })
 
     it('does not emit send on Shift+Enter', async () => {
@@ -36,7 +36,7 @@ describe('ChatInput', () => {
 
     it('does not emit send when message is empty', async () => {
       const wrapper = mount(ChatInput)
-      await wrapper.find('button[aria-label="Send message"]').trigger('click')
+      await wrapper.find('button[aria-label="Send"]').trigger('click')
 
       expect(wrapper.emitted('send')).toBeUndefined()
     })
@@ -45,7 +45,7 @@ describe('ChatInput', () => {
       const wrapper = mount(ChatInput)
       const textarea = wrapper.find('textarea')
       await textarea.setValue('Hello')
-      await wrapper.find('button[aria-label="Send message"]').trigger('click')
+      await wrapper.find('button[aria-label="Send"]').trigger('click')
 
       expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('')
     })
@@ -57,21 +57,21 @@ describe('ChatInput', () => {
   describe('stop', () => {
     it('shows stop button when streaming', () => {
       const wrapper = mount(ChatInput, { props: { isStreaming: true } })
-      expect(wrapper.find('button[aria-label="Stop generation"]').exists()).toBe(true)
-      expect(wrapper.find('button[aria-label="Send message"]').exists()).toBe(false)
+      expect(wrapper.find('button[aria-label="Stop generating"]').exists()).toBe(true)
+      expect(wrapper.find('button[aria-label="Send"]').exists()).toBe(false)
     })
 
     it('emits stop on click', async () => {
       const wrapper = mount(ChatInput, { props: { isStreaming: true } })
-      await wrapper.find('button[aria-label="Stop generation"]').trigger('click')
+      await wrapper.find('button[aria-label="Stop generating"]').trigger('click')
 
       expect(wrapper.emitted('stop')).toHaveLength(1)
     })
 
     it('shows send button when not streaming', () => {
       const wrapper = mount(ChatInput, { props: { isStreaming: false } })
-      expect(wrapper.find('button[aria-label="Send message"]').exists()).toBe(true)
-      expect(wrapper.find('button[aria-label="Stop generation"]').exists()).toBe(false)
+      expect(wrapper.find('button[aria-label="Send"]').exists()).toBe(true)
+      expect(wrapper.find('button[aria-label="Stop generating"]').exists()).toBe(false)
     })
   })
 
@@ -98,13 +98,13 @@ describe('ChatInput', () => {
       const wrapper = mount(ChatInput, { props: { isOffline: true } })
       const textarea = wrapper.find('textarea')
       await textarea.setValue('Hello')
-      const sendBtn = wrapper.find('button[aria-label="Send message"]')
+      const sendBtn = wrapper.find('button[aria-label="Send"]')
       expect((sendBtn.element as HTMLButtonElement).disabled).toBe(true)
     })
 
     it('disables send button when message is empty', () => {
       const wrapper = mount(ChatInput)
-      const sendBtn = wrapper.find('button[aria-label="Send message"]')
+      const sendBtn = wrapper.find('button[aria-label="Send"]')
       expect((sendBtn.element as HTMLButtonElement).disabled).toBe(true)
     })
 

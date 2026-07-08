@@ -1,51 +1,106 @@
 import { randomUUID } from 'crypto'
+import { spawn } from 'child_process'
 import os from 'os'
 import type {
   AgentRunner,
   AgentRunnerConfig,
   AgentStreamEvent,
 } from './types'
+import {
+  DESTRUCTIVE_TOOLS,
+  requiresApproval,
+  isN8nToolDenied,
+  isToolAllowed,
+  canonicalToolName,
+  type ApprovalDecision,
+} from './approval'
+import {
+  ASK_USER_QUESTION_TOOL,
+  type AskUserQuestionItem,
+  type AskUserAnswers,
+} from './ask-user-question'
+import { AsyncEventQueue } from './event-queue'
 
-// Destructive MCP tools that require user approval before execution
-const DESTRUCTIVE_TOOLS = new Set([
-  'create_workflow_from_code',
-  'update_workflow',
-  'publish_workflow',
-  'archive_workflow',
-  'execute_workflow',
-])
-
-/** Deferred promise that can be resolved externally */
+/** Deferred approval decision, keyed by approval id. */
 interface PendingApproval {
-  id: string
   toolName: string
-  args: Record<string, unknown>
+  /**
+   * LIVE session allow set (config.sessionAllowedTools) — `approve_always`
+   * adds the canonical tool name here before resolving with a plain approve.
+   */
+  allowSet: Set<string>
   resolve: (decision: 'approve' | 'reject') => void
 }
+
+/** Deferred ask_user_question answers, keyed by question id (`null` = cancelled). */
+interface PendingQuestion {
+  resolve: (answers: AskUserAnswers | null) => void
+}
+
+/**
+ * Fallback abort delay after a reject (ms). Reject stops the run, but only
+ * AFTER the denied call's tool_result is pumped (so it persists to JSONL).
+ * If the SDK never surfaces that result, this timer aborts anyway so the
+ * session cannot hang.
+ */
+const REJECT_STOP_FALLBACK_MS = 3_000
+
+/**
+ * MCP tool timeout for the CLI subprocess (ms) — the ONLY timeout knob the
+ * CLI exposes, and it is global across all MCP tools. Set to a "human budget"
+ * (24h): ask_user_question blocks its in-process MCP handler until the user
+ * answers in the UI, and a 6-minute ceiling would kill a question the user
+ * left open over lunch. Server-side budgets still bound n8n calls (e.g.
+ * execute_workflow's 5-minute budget returns or errors on its own), and
+ * stop() remains the escape hatch for a wedged call.
+ */
+const MCP_TOOL_TIMEOUT_MS = 86_400_000
 
 /**
  * Claude Agent SDK runner implementation.
  *
- * Uses the `query()` API from @anthropic-ai/claude-agent-sdk to run an agent
- * with native MCP server support. The SDK spawns a Claude Code subprocess,
- * so it requires the Claude Code CLI to be installed on the system.
+ * Uses the `query()` API from @anthropic-ai/claude-agent-sdk, which spawns the
+ * SDK's bundled CLI as a subprocess and talks line-delimited JSON to it.
  *
  * Key behaviors:
- * - Passes mcpServers config pointing to n8n's /mcp-server/http with Bearer auth
- * - Uses canUseTool callback to intercept destructive MCP tools and emit approval_required events
- * - Normalizes SDK messages to AgentStreamEvent format
- * - Uses AbortController for stop() support
- * - Tracks pending approvals via a Map of deferred promises resolved by approve()
+ * - All events flow through ONE AsyncEventQueue with two producers: the SDK
+ *   message pump and the canUseTool callback. This is load-bearing: while the
+ *   SDK is blocked inside canUseTool awaiting a decision it emits no messages,
+ *   so a queue drained only per-message would never deliver approval_required.
+ * - Approval gating is namespace-aware (`mcp__{server}__{tool}`) via the
+ *   shared requiresApproval matcher — a bare-name check never matches and
+ *   silently allows destructive tools.
+ * - The approval id is the SDK's toolUseID, so it correlates with the
+ *   tool_call_start the renderer already tracks.
+ * - Token-level streaming via includePartialMessages; complete assistant
+ *   messages are used only for tool_use blocks (no double text).
+ * - The CLI subprocess is spawned via process.execPath + ELECTRON_RUN_AS_NODE
+ *   so packaged Electron apps work without a system `node` on PATH.
  */
 export class ClaudeSdkRunner implements AgentRunner {
   private abortControllers = new Map<string, AbortController>()
-  private pendingApprovals = new Map<string, PendingApproval>()
+  private pendingApprovals = new Map<string, Map<string, PendingApproval>>()
+  private pendingQuestions = new Map<string, Map<string, PendingQuestion>>()
+  /**
+   * tool_use id of the session's latest ask_user_question call, captured in
+   * canUseTool (which fires BEFORE the MCP handler runs — race-free) so
+   * question_asked correlates with the tool_call_start the renderer tracked.
+   */
+  private lastQuestionToolUseId = new Map<string, string>()
   private activeQueries = new Map<string, { close: () => void }>()
   /** Per-session in-process MCP servers for file tools (cleanup via McpServer.close()) */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private localMcpServers = new Map<string, { close: () => Promise<void> }>()
   /** Maps tool_use block ID → tool name so tool_call_result can include the name */
   private toolNameMap = new Map<string, string>()
+  /** tool_use ids surfaced as todo_update instead of tool cards — results suppressed */
+  private suppressedToolIds = new Set<string>()
+  /**
+   * Per-session ids of tool calls the user rejected. Reject stops the run:
+   * once the denied call's tool_call_result is pumped, the runner aborts.
+   */
+  private rejectedToolIds = new Map<string, Set<string>>()
+  /** Per-session fallback timers for the reject-stop abort. */
+  private rejectFallbackTimers = new Map<string, NodeJS.Timeout>()
 
   async *invoke(
     sessionId: string,
@@ -62,8 +117,8 @@ export class ClaudeSdkRunner implements AgentRunner {
         type: 'error',
         sessionId,
         data: {
-          message: 'Claude Code is required for the Claude Agent SDK backend. Install it or switch to Deep Agents in Settings > AI/Agent.',
-          code: 'CLAUDE_CODE_NOT_FOUND',
+          message: 'The Claude Agent SDK could not be loaded. Reinstall n8n-desk or switch to Deep Agents in Settings > AI/Agent.',
+          code: 'CLAUDE_SDK_NOT_FOUND',
         },
       }
       yield { type: 'done', sessionId, data: { reason: 'error' } }
@@ -72,66 +127,97 @@ export class ClaudeSdkRunner implements AgentRunner {
 
     const abortController = new AbortController()
     this.abortControllers.set(sessionId, abortController)
+    this.pendingApprovals.set(sessionId, new Map())
+    this.pendingQuestions.set(sessionId, new Map())
+    this.rejectedToolIds.set(sessionId, new Set())
 
-    // Build the event channel — we yield from a queue since canUseTool is called
-    // asynchronously by the SDK and needs to emit events into our stream.
-    const eventQueue: AgentStreamEvent[] = []
-    let eventResolve: (() => void) | null = null
+    const queue = new AsyncEventQueue<AgentStreamEvent>()
 
-    const pushEvent = (event: AgentStreamEvent): void => {
-      eventQueue.push(event)
-      if (eventResolve) {
-        eventResolve()
-        eventResolve = null
-      }
-    }
-
-    // canUseTool callback — intercept destructive tools for approval.
-    // Must return the full PermissionResult type the SDK expects.
-    // Always include built-in destructive tools, plus any additional tools from
-    // approval-required custom MCP servers (populated by the IPC handler via
-    // PluginManager.getApprovalRequiredServerNames() + tool discovery).
     const interruptTools = new Set([
       ...DESTRUCTIVE_TOOLS,
       ...(config.interruptOnTools ?? []),
     ])
+    // Session allow set is the LIVE Set owned by the IPC layer — approve()
+    // mutates it on approve_always and it persists across invokes.
+    const sessionAllow = config.sessionAllowedTools ?? new Set<string>()
+    const persistentAllow = config.alwaysAllowedTools ?? []
+
+    const stopAfterRejectedResult = (): void => {
+      const timer = this.rejectFallbackTimers.get(sessionId)
+      if (timer) {
+        clearTimeout(timer)
+        this.rejectFallbackTimers.delete(sessionId)
+      }
+      abortController.abort()
+      this.activeQueries.get(sessionId)?.close()
+    }
+
     const canUseTool: import('@anthropic-ai/claude-agent-sdk').CanUseTool = async (
       toolName,
       input,
       options,
     ) => {
-      // Only intercept tools that require approval
-      if (!interruptTools.has(toolName)) {
+      // TodoWrite is the plan-tracking built-in — surface it as todo_update
+      // and always allow (never a destructive operation).
+      if (toolName === 'TodoWrite') {
+        const todos = this.mapTodoWriteInput(input)
+        if (todos) {
+          queue.push({ type: 'todo_update', sessionId, data: { todos } })
+        }
         return { behavior: 'allow' as const, updatedInput: input }
       }
 
-      const approvalId = randomUUID()
-      const description = `Approve ${toolName}?`
+      // ask_user_question is never approval-gated (it IS the human
+      // interaction). Capture its toolUseID here — canUseTool fires before
+      // the MCP handler runs, so the id is in place when askUser needs it.
+      if (toolName.endsWith(`__${ASK_USER_QUESTION_TOOL}`)) {
+        this.lastQuestionToolUseId.set(sessionId, options.toolUseID ?? randomUUID())
+        return { behavior: 'allow' as const, updatedInput: input }
+      }
 
-      pushEvent({
+      // Mode restrictions (audit #12): denied tools are hidden via
+      // disallowedTools below, but the deny here is the enforcement — the
+      // CLI's tool list is discovered from the live server and could drift.
+      if (config.deniedTools && isN8nToolDenied(toolName, config.deniedTools)) {
+        return {
+          behavior: 'deny' as const,
+          message: `${toolName} is not available in this mode. Workflow lifecycle management (update/publish/unpublish/archive) requires Workflow mode.`,
+        }
+      }
+
+      // Deny beats allow: the mode-restriction deny above must run before the
+      // allowlists. A tool prompts only when it is gated AND not covered by
+      // the session grant (approve_always) or the persistent presets.
+      const gated =
+        requiresApproval(toolName, interruptTools) &&
+        !isToolAllowed(toolName, sessionAllow) &&
+        !isToolAllowed(toolName, persistentAllow)
+      if (!gated) {
+        return { behavior: 'allow' as const, updatedInput: input }
+      }
+
+      // Use the SDK's toolUseID so the approval correlates with the
+      // tool_call_start the renderer tracked from the assistant message.
+      const approvalId = options.toolUseID ?? randomUUID()
+
+      queue.push({
         type: 'approval_required',
         sessionId,
-        data: { id: approvalId, toolName, args: input, description },
+        data: { id: approvalId, toolName, args: input, description: `Approve ${toolName}?` },
       })
 
-      // Wait for user decision
       const decision = await new Promise<'approve' | 'reject'>((resolve) => {
-        this.pendingApprovals.set(sessionId, {
-          id: approvalId,
-          toolName,
-          args: input,
-          resolve,
-        })
+        this.pendingApprovals.get(sessionId)?.set(approvalId, { toolName, allowSet: sessionAllow, resolve })
 
-        // If abort is signaled while waiting, reject
         const onAbort = (): void => {
-          this.pendingApprovals.delete(sessionId)
+          this.pendingApprovals.get(sessionId)?.delete(approvalId)
           resolve('reject')
         }
         options.signal.addEventListener('abort', onAbort, { once: true })
       })
+      this.pendingApprovals.get(sessionId)?.delete(approvalId)
 
-      pushEvent({
+      queue.push({
         type: 'approval_resolved',
         sessionId,
         data: { id: approvalId, decision },
@@ -140,19 +226,27 @@ export class ClaudeSdkRunner implements AgentRunner {
       if (decision === 'approve') {
         return { behavior: 'allow' as const, updatedInput: input }
       }
-      return { behavior: 'deny' as const, message: `User rejected ${toolName}` }
+
+      // Reject stops the run. The deny result must reach JSONL first (the
+      // store persists on tool_call_result), so the abort happens when the
+      // pump sees this id — with a fallback timer in case the SDK never
+      // surfaces the result. Skip when the session is already aborted
+      // (stop() resolves pending approvals as reject).
+      if (!abortController.signal.aborted) {
+        this.rejectedToolIds.get(sessionId)?.add(approvalId)
+        this.rejectFallbackTimers.set(
+          sessionId,
+          setTimeout(stopAfterRejectedResult, REJECT_STOP_FALLBACK_MS),
+        )
+      }
+      return { behavior: 'deny' as const, message: `The user rejected ${toolName} and stopped the run.` }
     }
 
-    // Use the resolved MCP endpoint + token (default n8n MCP or per-instance custom override)
-    const mcpServerUrl = config.mcpUrl
-
-    // Build the MCP servers map: n8n entry + any custom servers from plugins/standalone.
-    // Credential isolation: MCP Bearer token only in the 'n8n' entry, each custom server
-    // only gets its own headers. Server names must be unique — 'n8n' is reserved.
-    const mcpServers: Record<string, { type: 'http'; url: string; headers: Record<string, string> }> = {
+    // Build the MCP servers map: n8n entry + custom servers + in-process local tools.
+    const mcpServers: Record<string, unknown> = {
       'n8n': {
         type: 'http',
-        url: mcpServerUrl,
+        url: config.mcpUrl,
         headers: {
           Authorization: `Bearer ${config.mcpAccessToken}`,
         },
@@ -161,8 +255,7 @@ export class ClaudeSdkRunner implements AgentRunner {
 
     if (config.customMcpServers) {
       for (const [name, serverConfig] of Object.entries(config.customMcpServers)) {
-        // Skip if name collides with the reserved 'n8n' entry
-        if (name === 'n8n') continue
+        if (name === 'n8n') continue // reserved
         mcpServers[name] = {
           type: serverConfig.type,
           url: serverConfig.url,
@@ -171,110 +264,72 @@ export class ClaudeSdkRunner implements AgentRunner {
       }
     }
 
-    // Expose sandboxed file tools + js_compute via an in-process MCP server
-    // using the SDK's native McpSdkServerConfigWithInstance. This avoids the
-    // HTTP localhost server entirely — the SDK talks to our McpServer instance
-    // directly in-process, which is faster and more reliable.
-    if (config.sandboxPolicy) {
+    // Expose the shared local toolset (sandboxed file tools + js_compute +
+    // memory + skills + ask_user_question) via an in-process MCP server —
+    // identical surface to the Deep Agents backend (parity invariant). The
+    // server is created unconditionally: ask_user_question is always
+    // available, matching the Deep Agents backend.
+    {
+      // The blocking wait for the user's answer lives HERE, in the MCP tool
+      // handler — canUseTool can only allow/deny, it cannot inject a tool
+      // result. Events go through the shared queue so they interleave while
+      // the SDK is blocked inside the tool call.
+      const askUser = async (questions: AskUserQuestionItem[]): Promise<AskUserAnswers> => {
+        const questionId = this.lastQuestionToolUseId.get(sessionId) ?? randomUUID()
+
+        queue.push({
+          type: 'question_asked',
+          sessionId,
+          data: { id: questionId, questions },
+        })
+
+        const answers = await new Promise<AskUserAnswers | null>((resolve) => {
+          if (abortController.signal.aborted) {
+            resolve(null)
+            return
+          }
+          this.pendingQuestions.get(sessionId)?.set(questionId, { resolve })
+          const onAbort = (): void => {
+            this.pendingQuestions.get(sessionId)?.delete(questionId)
+            resolve(null)
+          }
+          abortController.signal.addEventListener('abort', onAbort, { once: true })
+        })
+        this.pendingQuestions.get(sessionId)?.delete(questionId)
+
+        if (answers === null) {
+          throw new Error('The user cancelled the session before answering.')
+        }
+
+        queue.push({
+          type: 'question_answered',
+          sessionId,
+          data: { id: questionId, answers },
+        })
+
+        return answers
+      }
+
       try {
         const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js')
-        const { createFileTools } = await import('./file-tools')
-        const { jsComputeTool } = await import('./js-sandbox')
+        const { registerAgentTools } = await import('./agent-tool-registry')
 
         const mcpServer = new McpServer(
           { name: 'n8n-desk-local', version: '1.0.0' },
           { capabilities: { tools: {} } },
         )
+        const registered = registerAgentTools(mcpServer, config.sandboxPolicy, config.skills ?? [], {
+          memoryFilePath: config.memoryFilePath,
+          askUser,
+        })
+        console.log(`[n8n-desk] Registered ${registered} local tools on in-process MCP server`)
 
-        // Register all file tools + js_compute as MCP tools on the in-process server
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const allTools: any[] = [...createFileTools(config.sandboxPolicy), jsComputeTool]
-        for (const lcTool of allTools) {
-          const zodShape = lcTool.schema?.shape
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const handler = async (args: Record<string, unknown>): Promise<any> => {
-            try {
-              const result = await lcTool.invoke(args)
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: typeof result === 'string' ? result : JSON.stringify(result),
-                }],
-              }
-            } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : String(err)
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({ success: false, error: message }),
-                }],
-                isError: true,
-              }
-            }
-          }
-          if (zodShape) {
-            mcpServer.tool(lcTool.name, lcTool.description ?? '', zodShape, handler)
-          } else {
-            mcpServer.tool(lcTool.name, lcTool.description ?? '', handler)
-          }
-        }
-
-        // Register skill tools (invoke_skill + read_skill_file) when skills are configured
-        if (config.skills && config.skills.length > 0) {
-          const { substituteArguments, readSupportingFile } = await import('../skill-loader')
-          const { z } = await import('zod')
-          const skills = config.skills
-
-          mcpServer.tool(
-            'invoke_skill',
-            'Load a skill by name. Returns the full instructions with arguments substituted. If the content references additional files (e.g., [PATTERNS.md](PATTERNS.md)), use read_skill_file to load them.',
-            {
-              skillName: z.string().describe('The kebab-case name of the skill to invoke'),
-              arguments: z.string().optional().describe('Arguments to substitute into the skill content'),
-            },
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            async (args: { skillName: string; arguments?: string }): Promise<any> => {
-              const skill = skills.find((s) => s.name === args.skillName)
-              if (!skill) {
-                return { content: [{ type: 'text' as const, text: `Skill "${args.skillName}" not found.` }], isError: true }
-              }
-              return { content: [{ type: 'text' as const, text: substituteArguments(skill.content, args.arguments ?? '') }] }
-            },
-          )
-
-          mcpServer.tool(
-            'read_skill_file',
-            'Read a supporting file referenced by a skill (e.g., PATTERNS.md, SDK-API.md). Use when invoke_skill returns content that references additional files.',
-            {
-              skillName: z.string().describe('The skill name that owns this file'),
-              filePath: z.string().describe('Relative path within the skill directory (e.g., "PATTERNS.md")'),
-            },
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            async (args: { skillName: string; filePath: string }): Promise<any> => {
-              const skill = skills.find((s) => s.name === args.skillName)
-              if (!skill) {
-                return { content: [{ type: 'text' as const, text: `Skill "${args.skillName}" not found.` }], isError: true }
-              }
-              const content = await readSupportingFile(skill, args.filePath)
-              if (content === null) {
-                return { content: [{ type: 'text' as const, text: `File "${args.filePath}" not found in skill "${args.skillName}".` }], isError: true }
-              }
-              return { content: [{ type: 'text' as const, text: content }] }
-            },
-          )
-
-          console.log(`[n8n-desk] Registered invoke_skill + read_skill_file for ${skills.length} skills on in-process MCP server`)
-        }
-
-        console.log(`[n8n-desk] Registered ${allTools.length} file tools on in-process MCP server`)
         this.localMcpServers.set(sessionId, mcpServer)
-
-        // Use SDK-native in-process server — no HTTP, no port, no transport issues
         mcpServers['n8n-desk-local'] = {
           type: 'sdk',
           name: 'n8n-desk-local',
           instance: mcpServer,
-        } as Record<string, unknown> as typeof mcpServers[string]
+        }
       } catch (err) {
         // Non-fatal: file tools won't be available, but n8n MCP tools still work
         console.error(
@@ -284,16 +339,16 @@ export class ClaudeSdkRunner implements AgentRunner {
       }
     }
 
-    try {
-      // Build the prompt: if we have conversation history, format it as context
-      let fullPrompt = message
-      if (config.conversationHistory && config.conversationHistory.length > 0) {
-        const historyBlock = config.conversationHistory
-          .map((m) => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
-          .join('\n\n')
-        fullPrompt = `<conversation_history>\n${historyBlock}\n</conversation_history>\n\nHuman: ${message}`
-      }
+    // Build the prompt: if we have conversation history, format it as context
+    let fullPrompt = message
+    if (config.conversationHistory && config.conversationHistory.length > 0) {
+      const historyBlock = config.conversationHistory
+        .map((m) => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+        .join('\n\n')
+      fullPrompt = `<conversation_history>\n${historyBlock}\n</conversation_history>\n\nHuman: ${message}`
+    }
 
+    try {
       const queryInstance = queryFn({
         prompt: fullPrompt,
         options: {
@@ -302,45 +357,105 @@ export class ClaudeSdkRunner implements AgentRunner {
           abortController,
           permissionMode: 'acceptEdits',
           canUseTool,
-          mcpServers,
-          // Disable all built-in tools — we only want MCP tools
-          tools: [],
-          // Set working directory explicitly to avoid undefined path errors
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          mcpServers: mcpServers as any,
+          // TodoWrite is the only built-in we keep — it powers todo_update
+          // parity with the Deep Agents backend. Everything else comes from
+          // MCP servers so the sandbox filter is the only file-access path.
+          tools: ['TodoWrite'],
+          // Hide mode-restricted n8n tools from the model entirely; the
+          // canUseTool deny above stays as the enforcement backstop (#12).
+          ...(config.deniedTools && config.deniedTools.length > 0
+            ? { disallowedTools: config.deniedTools.map((t) => `mcp__n8n__${t}`) }
+            : {}),
+          // Token-level streaming (stream_event messages) requires this flag.
+          includePartialMessages: true,
+          // ONLY the servers configured above — without this the CLI also
+          // loads the user's personal Claude Code MCP servers (~/.claude.json),
+          // polluting the tool surface and routing n8n calls to whatever
+          // connectors the user has configured globally.
+          strictMcpConfig: true,
+          // Never write session files into ~/.claude/projects/
+          persistSession: false,
           cwd: os.homedir(),
-          // Pass API key to the spawned Claude Code subprocess
           env: {
             ...process.env,
             ...(config.llmConfig.apiKey ? { ANTHROPIC_API_KEY: config.llmConfig.apiKey } : {}),
+            // Long n8n workflow executions exceed the CLI's default MCP tool
+            // timeout — align it with the server's 5-minute budget.
+            MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS),
           },
+          // Spawn the bundled CLI through OUR executable in Node mode.
+          // Packaged Electron apps have no `node` on PATH; process.execPath +
+          // ELECTRON_RUN_AS_NODE works in dev (plain node ignores the var) and
+          // in production builds alike.
+          spawnClaudeCodeProcess: (spawnOpts) => spawn(process.execPath, spawnOpts.args, {
+            cwd: spawnOpts.cwd,
+            env: { ...spawnOpts.env, ELECTRON_RUN_AS_NODE: '1' },
+            signal: spawnOpts.signal,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            windowsHide: true,
+          }),
         },
       })
 
       this.activeQueries.set(sessionId, queryInstance)
 
-      // Process SDK messages and normalize to AgentStreamEvent
-      for await (const sdkMessage of queryInstance) {
-        if (abortController.signal.aborted) break
-
-        const events = this.normalizeMessage(sessionId, sdkMessage)
-        for (const event of events) {
-          yield event
+      // Producer: pump SDK messages into the queue. Runs detached from the
+      // consumer loop so canUseTool events interleave even while the pump is
+      // blocked. Exactly one terminal done/error pair is enqueued here.
+      void (async () => {
+        let sawResultError = false
+        try {
+          for await (const sdkMessage of queryInstance) {
+            if (abortController.signal.aborted) break
+            const events = this.normalizeMessage(sessionId, sdkMessage)
+            let sawRejectedResult = false
+            for (const event of events) {
+              if (event.type === 'error') sawResultError = true
+              queue.push(event)
+              if (
+                event.type === 'tool_call_result' &&
+                this.rejectedToolIds.get(sessionId)?.has(event.data.id)
+              ) {
+                sawRejectedResult = true
+              }
+            }
+            // Reject-stop: the denied call's result is now in the queue (and
+            // will persist to JSONL) — abort before the model reasons further.
+            if (sawRejectedResult) {
+              stopAfterRejectedResult()
+              break
+            }
+          }
+        } catch (err) {
+          if (!abortController.signal.aborted) {
+            sawResultError = true
+            queue.push({
+              type: 'error',
+              sessionId,
+              data: {
+                message: err instanceof Error ? err.message : String(err),
+                code: 'AGENT_ERROR',
+              },
+            })
+          }
+        } finally {
+          queue.push({
+            type: 'done',
+            sessionId,
+            data: {
+              reason: abortController.signal.aborted
+                ? 'cancelled'
+                : sawResultError ? 'error' : 'completed',
+            },
+          })
+          queue.close()
         }
+      })()
 
-        // Also yield any events pushed by canUseTool callback
-        while (eventQueue.length > 0) {
-          yield eventQueue.shift()!
-        }
-      }
-
-      // Drain any remaining queued events
-      while (eventQueue.length > 0) {
-        yield eventQueue.shift()!
-      }
-
-      yield {
-        type: 'done',
-        sessionId,
-        data: { reason: abortController.signal.aborted ? 'cancelled' : 'completed' },
+      for await (const event of queue) {
+        yield event
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
@@ -366,30 +481,81 @@ export class ClaudeSdkRunner implements AgentRunner {
       query.close()
     }
 
-    // Reject any pending approval
+    // Reject all pending approvals for this session
     const pending = this.pendingApprovals.get(sessionId)
     if (pending) {
-      pending.resolve('reject')
+      for (const approval of pending.values()) {
+        approval.resolve('reject')
+      }
+      pending.clear()
+    }
+
+    // Cancel all pending questions for this session
+    const questions = this.pendingQuestions.get(sessionId)
+    if (questions) {
+      for (const question of questions.values()) {
+        question.resolve(null)
+      }
+      questions.clear()
     }
 
     this.cleanup(sessionId)
   }
 
-  async approve(sessionId: string, decision: 'approve' | 'reject'): Promise<void> {
+  async approve(sessionId: string, approvalId: string, decision: ApprovalDecision): Promise<boolean> {
     const pending = this.pendingApprovals.get(sessionId)
-    if (!pending) {
-      return
+    if (!pending || pending.size === 0) {
+      return false
     }
 
-    pending.resolve(decision)
-    this.pendingApprovals.delete(sessionId)
+    const approval = pending.get(approvalId)
+    if (approval) {
+      pending.delete(approvalId)
+      if (decision === 'approve_always') {
+        // Grant future calls of this tool for the rest of the session, then
+        // approve the pending one. The allow set is the live IPC-owned Set,
+        // so the grant survives runner recreation on the next invoke.
+        approval.allowSet.add(canonicalToolName(approval.toolName))
+        approval.resolve('approve')
+      } else {
+        approval.resolve(decision)
+      }
+      return true
+    }
+
+    return false
+  }
+
+  async answer(sessionId: string, questionId: string, answers: AskUserAnswers): Promise<boolean> {
+    const pending = this.pendingQuestions.get(sessionId)
+    if (!pending || pending.size === 0) {
+      return false
+    }
+
+    const question = pending.get(questionId)
+    if (question) {
+      pending.delete(questionId)
+      question.resolve(answers)
+      return true
+    }
+
+    return false
   }
 
   private cleanup(sessionId: string): void {
     this.abortControllers.delete(sessionId)
     this.pendingApprovals.delete(sessionId)
+    this.pendingQuestions.delete(sessionId)
+    this.lastQuestionToolUseId.delete(sessionId)
     this.activeQueries.delete(sessionId)
     this.toolNameMap.clear()
+    this.suppressedToolIds.clear()
+    this.rejectedToolIds.delete(sessionId)
+    const rejectTimer = this.rejectFallbackTimers.get(sessionId)
+    if (rejectTimer) {
+      clearTimeout(rejectTimer)
+      this.rejectFallbackTimers.delete(sessionId)
+    }
 
     // Close the per-session in-process MCP server (file tools + js_compute)
     const localServer = this.localMcpServers.get(sessionId)
@@ -399,15 +565,33 @@ export class ClaudeSdkRunner implements AgentRunner {
     }
   }
 
+  /** Map a TodoWrite tool input to the todo_update event shape. */
+  private mapTodoWriteInput(
+    input: Record<string, unknown>,
+  ): Array<{ id: string; title: string; status: 'pending' | 'in_progress' | 'completed' | 'failed' }> | null {
+    const todos = input.todos
+    if (!Array.isArray(todos)) return null
+    return todos.map((t, index) => {
+      const todo = (t ?? {}) as Record<string, unknown>
+      const status = typeof todo.status === 'string' ? todo.status : 'pending'
+      return {
+        id: String(index),
+        title: typeof todo.content === 'string' ? todo.content : '',
+        status: (['pending', 'in_progress', 'completed', 'failed'].includes(status)
+          ? status
+          : 'pending') as 'pending' | 'in_progress' | 'completed' | 'failed',
+      }
+    })
+  }
+
   /**
    * Normalize an SDK message into zero or more AgentStreamEvents.
    *
-   * SDK message types we care about:
-   * - assistant: contains content blocks (text, tool_use)
-   * - stream_event: partial streaming events
-   * - result: final result with success/error
-   * - system (init): session initialization info
-   * - tool_progress: tool execution progress
+   * - stream_event (partial): token-level text_chunk / thinking deltas
+   * - assistant: tool_use blocks ONLY → tool_call_start (text already streamed)
+   * - user: tool_result blocks → tool_call_result (success from is_error flag)
+   * - result: real error subtypes (error_during_execution / error_max_turns /
+   *   error_max_budget_usd / …) → error event
    */
   private normalizeMessage(
     sessionId: string,
@@ -415,72 +599,84 @@ export class ClaudeSdkRunner implements AgentRunner {
   ): AgentStreamEvent[] {
     const events: AgentStreamEvent[] = []
 
-    // Debug: log all SDK messages with content summary
-    const msgAny = msg as Record<string, unknown>
-    const debugInfo: Record<string, unknown> = { type: msg.type }
-    if (msg.type === 'assistant' && msgAny.message) {
-      const m = msgAny.message as Record<string, unknown>
-      if (Array.isArray(m.content)) {
-        debugInfo.blocks = (m.content as Array<Record<string, unknown>>).map((b) => b.type)
-      }
-    } else if (msg.type === 'user') {
-      debugInfo.parent_tool_use_id = msgAny.parent_tool_use_id
-      debugInfo.hasResult = msgAny.tool_use_result !== undefined
-    } else if (msg.type === 'tool_progress') {
-      debugInfo.tool = msgAny.tool_name ?? msgAny.name
-      debugInfo.progress = typeof msgAny.data === 'string' ? msgAny.data.slice(0, 100) : undefined
-    } else if (msg.type === 'result') {
-      debugInfo.subtype = msgAny.subtype
-    }
-    console.log('[n8n-desk SDK msg]', JSON.stringify(debugInfo))
-
     switch (msg.type) {
-      case 'assistant': {
-        // BetaMessage contains content blocks (text + tool_use).
-        // Extract both: text blocks as text_chunk events, tool_use blocks as tool_call_start.
-        const message = msg.message
-        if (message?.content) {
-          for (const block of message.content) {
-            if (block.type === 'thinking' && (block as Record<string, unknown>).thinking) {
-              events.push({
-                type: 'thinking',
-                sessionId,
-                data: { text: (block as Record<string, unknown>).thinking as string },
-              })
-            } else if (block.type === 'text' && block.text) {
-              events.push({
-                type: 'text_chunk',
-                sessionId,
-                data: { text: block.text },
-              })
-            } else if (block.type === 'tool_use') {
-              // Track tool name for later lookup in tool_call_result
-              this.toolNameMap.set(block.id, block.name)
-              events.push({
-                type: 'tool_call_start',
-                sessionId,
-                data: {
-                  id: block.id,
-                  name: block.name,
-                  args: (block.input as Record<string, unknown>) ?? {},
-                },
-              })
-            }
+      case 'stream_event': {
+        const event = (msg as Record<string, unknown>).event as Record<string, unknown> | undefined
+        if (event?.type === 'content_block_delta') {
+          const delta = event.delta as Record<string, unknown> | undefined
+          if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
+            events.push({ type: 'text_chunk', sessionId, data: { text: delta.text } })
+          } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
+            events.push({ type: 'thinking', sessionId, data: { text: delta.thinking } })
           }
         }
         break
       }
 
-      case 'stream_event': {
-        // Partial streaming — map content_block_delta events
-        const event = msg.event
-        if (event.type === 'content_block_delta') {
-          const delta = event.delta as Record<string, unknown>
-          if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+      case 'assistant': {
+        // Text/thinking blocks were already streamed via stream_event deltas —
+        // only extract tool_use blocks here.
+        const message = (msg as Record<string, unknown>).message as { content?: unknown[] } | undefined
+        if (Array.isArray(message?.content)) {
+          for (const rawBlock of message.content) {
+            const block = rawBlock as Record<string, unknown>
+            if (block.type !== 'tool_use') continue
+            const id = String(block.id ?? randomUUID())
+            const name = String(block.name ?? 'unknown')
+            // TodoWrite is surfaced as todo_update from canUseTool, not as a
+            // tool card.
+            if (name === 'TodoWrite') {
+              this.suppressedToolIds.add(id)
+              continue
+            }
+            this.toolNameMap.set(id, name)
             events.push({
-              type: 'text_chunk',
+              type: 'tool_call_start',
               sessionId,
-              data: { text: delta.text },
+              data: {
+                id,
+                name,
+                args: (block.input as Record<string, unknown>) ?? {},
+              },
+            })
+          }
+        }
+        break
+      }
+
+      case 'user': {
+        // Tool results come back as 'user' messages containing tool_result blocks.
+        const userMsg = msg as Record<string, unknown>
+        const message = userMsg.message as { content?: unknown[] } | undefined
+        if (Array.isArray(message?.content)) {
+          for (const rawBlock of message.content) {
+            const block = rawBlock as Record<string, unknown>
+            if (block.type !== 'tool_result') continue
+            const toolUseId = typeof block.tool_use_id === 'string' ? block.tool_use_id : null
+            if (!toolUseId) continue
+            if (this.suppressedToolIds.has(toolUseId)) {
+              this.suppressedToolIds.delete(toolUseId)
+              continue
+            }
+
+            const toolName = this.toolNameMap.get(toolUseId) ?? ''
+
+            const rawContent = block.content ?? userMsg.tool_use_result
+            const resultStr = typeof rawContent === 'string'
+              ? rawContent
+              : JSON.stringify(rawContent ?? '')
+            const isError = block.is_error === true
+
+            events.push({
+              type: 'tool_call_result',
+              sessionId,
+              data: {
+                id: toolUseId,
+                name: toolName,
+                result: resultStr,
+                success: !isError,
+                ...(isError ? { error: resultStr } : {}),
+              },
             })
           }
         }
@@ -488,116 +684,31 @@ export class ClaudeSdkRunner implements AgentRunner {
       }
 
       case 'result': {
-        if (msg.subtype === 'error') {
-          const errorMsg = msg as import('@anthropic-ai/claude-agent-sdk').SDKResultError
+        // Real error subtypes are error_during_execution / error_max_turns /
+        // error_max_budget_usd / error_max_structured_output_retries.
+        // (`subtype === 'error'` does not exist and never matches.)
+        const resultMsg = msg as Record<string, unknown>
+        const subtype = String(resultMsg.subtype ?? '')
+        if (subtype.startsWith('error')) {
+          const errors = resultMsg.errors
+          const detail = Array.isArray(errors) && errors.length > 0
+            ? errors.map(String).join('; ')
+            : `Agent stopped: ${subtype.replace(/^error_?/, '').replace(/_/g, ' ')}`
           events.push({
             type: 'error',
             sessionId,
-            data: {
-              message: errorMsg.errors?.join('; ') ?? 'Agent execution failed',
-              code: 'AGENT_RESULT_ERROR',
-            },
-          })
-        }
-        // Success results contain final text — already streamed via assistant messages
-        break
-      }
-
-      case 'user': {
-        // Tool results come back as 'user' messages.
-        // parent_tool_use_id may be null — extract tool_use_id from content blocks instead.
-        const userMsg = msg as import('@anthropic-ai/claude-agent-sdk').SDKUserMessage
-
-        // Try to find the tool_use_id and result content
-        let toolUseId: string | null = userMsg.parent_tool_use_id
-        let resultContent: unknown = userMsg.tool_use_result
-
-        // Extract from message content blocks (tool_result blocks have tool_use_id)
-        if (userMsg.message?.content && Array.isArray(userMsg.message.content)) {
-          for (const block of userMsg.message.content) {
-            const b = block as Record<string, unknown>
-            if (b.type === 'tool_result') {
-              if (!toolUseId && typeof b.tool_use_id === 'string') {
-                toolUseId = b.tool_use_id
-              }
-              if (!resultContent) {
-                resultContent = b.content ?? b.output
-              }
-              break
-            }
-          }
-        }
-
-        // If we still don't have a result but tool_use_result exists, use it
-        if (!resultContent && userMsg.tool_use_result !== undefined) {
-          resultContent = userMsg.tool_use_result
-        }
-
-        if (toolUseId) {
-          const resultStr = typeof resultContent === 'string'
-            ? resultContent
-            : JSON.stringify(resultContent ?? '')
-
-          // Check if the result indicates an error
-          const isError = typeof resultContent === 'string'
-            && (resultContent.includes('"error"') || resultContent.includes('Error'))
-
-          // Look up the tool name from the earlier tool_call_start
-          const toolName = this.toolNameMap.get(toolUseId) ?? ''
-
-          events.push({
-            type: 'tool_call_result',
-            sessionId,
-            data: {
-              id: toolUseId,
-              name: toolName,
-              result: resultStr,
-              success: !isError,
-              ...(isError ? { error: resultStr } : {}),
-            },
-          })
-        } else if (resultContent !== undefined) {
-          // Tool result without a matching tool_use_id — emit with a generated id
-          const generatedId = randomUUID()
-          const resultStr = typeof resultContent === 'string'
-            ? resultContent
-            : JSON.stringify(resultContent ?? '')
-          events.push({
-            type: 'tool_call_result',
-            sessionId,
-            data: {
-              id: generatedId,
-              name: 'tool',
-              result: resultStr,
-              success: true,
-            },
+            data: { message: detail, code: subtype.toUpperCase() },
           })
         }
         break
       }
 
-      case 'tool_progress': {
-        // Tool is still executing — emit progress as text so user sees activity
-        const progressMsg = msg as Record<string, unknown>
-        const progressData = progressMsg.data ?? progressMsg.content ?? progressMsg.output
-        if (progressData && typeof progressData === 'string' && progressData.trim()) {
-          events.push({
-            type: 'text_chunk',
-            sessionId,
-            data: { text: progressData },
-          })
-        }
+      case 'system':
+      case 'tool_progress':
+        // init/status/progress — no renderer-visible events
         break
-      }
-
-      case 'system': {
-        // Init message — could emit session info if needed
-        break
-      }
 
       default:
-        // Other message types (auth_status, compact_boundary, etc.) — log for debugging
-        console.log('[n8n-desk SDK msg] unhandled type:', msg.type, JSON.stringify(msg).slice(0, 300))
         break
     }
 

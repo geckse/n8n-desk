@@ -18,12 +18,10 @@ import os from 'os'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { z } from 'zod'
 
+import { registerAgentTools } from '../agent-tool-registry'
 import { createFileTools } from '../file-tools'
-import { jsComputeTool } from '../js-sandbox'
 import { buildCoworkPolicy } from '../sandbox-policy'
-import { substituteArguments, readSupportingFile } from '../../skill-loader'
 import type { FilesystemSandboxPolicy, LoadedSkill } from '../types'
 
 // ---------------------------------------------------------------------------
@@ -31,8 +29,8 @@ import type { FilesystemSandboxPolicy, LoadedSkill } from '../types'
 // ---------------------------------------------------------------------------
 
 /**
- * Build the same in-process McpServer that ClaudeSdkRunner builds at runtime.
- * Mirrors claude-sdk-runner.ts:184-267.
+ * Build the same in-process McpServer that ClaudeSdkRunner builds at runtime,
+ * using the REAL production registration function (agent-tool-registry.ts).
  */
 function buildAgentMcpServer(
   policy: FilesystemSandboxPolicy,
@@ -42,94 +40,7 @@ function buildAgentMcpServer(
     { name: 'n8n-desk-local', version: '1.0.0' },
     { capabilities: { tools: {} } },
   )
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const allTools: any[] = [...createFileTools(policy), jsComputeTool]
-
-  for (const lcTool of allTools) {
-    const zodShape = lcTool.schema?.shape
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const handler = async (args: Record<string, unknown>): Promise<any> => {
-      try {
-        const result = await lcTool.invoke(args)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: typeof result === 'string' ? result : JSON.stringify(result),
-          }],
-        }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err)
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: message }),
-          }],
-          isError: true,
-        }
-      }
-    }
-    if (zodShape) {
-      server.tool(lcTool.name, lcTool.description ?? '', zodShape, handler)
-    } else {
-      server.tool(lcTool.name, lcTool.description ?? '', handler)
-    }
-  }
-
-  if (skills.length > 0) {
-    server.tool(
-      'invoke_skill',
-      'Load a skill by name.',
-      {
-        skillName: z.string(),
-        arguments: z.string().optional(),
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async (args: { skillName: string; arguments?: string }): Promise<any> => {
-        const skill = skills.find((s) => s.name === args.skillName)
-        if (!skill) {
-          return {
-            content: [{ type: 'text' as const, text: `Skill "${args.skillName}" not found.` }],
-            isError: true,
-          }
-        }
-        return {
-          content: [{
-            type: 'text' as const,
-            text: substituteArguments(skill.content, args.arguments ?? ''),
-          }],
-        }
-      },
-    )
-
-    server.tool(
-      'read_skill_file',
-      'Read a supporting file from a skill.',
-      {
-        skillName: z.string(),
-        filePath: z.string(),
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async (args: { skillName: string; filePath: string }): Promise<any> => {
-        const skill = skills.find((s) => s.name === args.skillName)
-        if (!skill) {
-          return {
-            content: [{ type: 'text' as const, text: `Skill "${args.skillName}" not found.` }],
-            isError: true,
-          }
-        }
-        const content = await readSupportingFile(skill, args.filePath)
-        if (content === null) {
-          return {
-            content: [{ type: 'text' as const, text: `File "${args.filePath}" not found.` }],
-            isError: true,
-          }
-        }
-        return { content: [{ type: 'text' as const, text: content }] }
-      },
-    )
-  }
-
+  registerAgentTools(server, policy, skills)
   return server
 }
 
@@ -159,6 +70,7 @@ function parseToolText(result: { content: Array<{ type: string; text?: string }>
 
 let tmpDir: string
 let projectDir: string
+let readonlyDir: string
 let n8nDeskDir: string
 let policy: FilesystemSandboxPolicy
 
@@ -168,10 +80,15 @@ beforeEach(async () => {
   const rawTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-pipeline-test-'))
   tmpDir = await fs.realpath(rawTmp)
   projectDir = path.join(tmpDir, 'project')
+  readonlyDir = path.join(tmpDir, 'readonly')
   n8nDeskDir = path.join(tmpDir, '.n8n-desk')
   await fs.mkdir(projectDir, { recursive: true })
+  await fs.mkdir(readonlyDir, { recursive: true })
   await fs.mkdir(path.join(n8nDeskDir, 'skills'), { recursive: true })
-  policy = buildCoworkPolicy([{ path: projectDir }], n8nDeskDir)
+  policy = buildCoworkPolicy(
+    [{ path: projectDir }, { path: readonlyDir, mode: 'ro' }],
+    n8nDeskDir,
+  )
 })
 
 afterEach(async () => {
@@ -201,7 +118,7 @@ async function setupPair(skills: LoadedSkill[] = []): Promise<{
 // ---------------------------------------------------------------------------
 
 describe('MCP pipeline tools/list', () => {
-  it('exposes 15 file tools + js_compute (16 total) when no skills', async () => {
+  it('exposes 22 file tools + js_compute (23 total) when no skills', async () => {
     const { client } = await setupPair()
     const { tools } = await client.listTools()
     const names = tools.map((t) => t.name).sort()
@@ -210,7 +127,14 @@ describe('MCP pipeline tools/list', () => {
     const fileNames = names.filter((n) => n !== 'js_compute')
     expect(fileNames).toEqual(
       [
+        'clipboard_read',
+        'clipboard_write',
+        'copy_file',
+        'delete_file',
+        'edit_text',
         'list_files',
+        'move_file',
+        'open_path',
         'read_csv',
         'read_docx',
         'read_excel',
@@ -227,7 +151,7 @@ describe('MCP pipeline tools/list', () => {
         'write_yaml',
       ].sort(),
     )
-    expect(tools).toHaveLength(16)
+    expect(tools).toHaveLength(23)
   })
 
   it('adds invoke_skill and read_skill_file when skills are provided', async () => {
@@ -248,7 +172,7 @@ describe('MCP pipeline tools/list', () => {
 
     expect(names).toContain('invoke_skill')
     expect(names).toContain('read_skill_file')
-    expect(tools).toHaveLength(18)
+    expect(tools).toHaveLength(25)
   })
 
   it('every tool advertises name, description, and inputSchema', async () => {
@@ -459,7 +383,7 @@ describe('MCP pipeline error propagation', () => {
     const result = await client.callTool({
       name: 'write_text',
       arguments: {
-        path: path.join(n8nDeskDir, 'should-not-write.md'),
+        path: path.join(readonlyDir, 'should-not-write.md'),
         content: 'attempt',
       },
     })

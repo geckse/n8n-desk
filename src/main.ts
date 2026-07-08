@@ -60,6 +60,15 @@ async function bootstrap() {
   // Mark Electron for CSS safe area handling (macOS traffic lights)
   if (window.n8nDesk) {
     document.body.classList.add('electron-app')
+
+    // Single global agent-event listener for the app lifetime. Events are
+    // routed by sessionId inside the stores, so background sessions keep
+    // streaming/persisting even when their view is not mounted (audit #23).
+    // Session ids are unique across modes — exactly one store owns each event.
+    window.n8nDesk.agent.onEvent((event) => {
+      useWorkflowSessionsStore().handleAgentEvent(event)
+      useCoworkSessionsStore().handleAgentEvent(event)
+    })
   }
 
   // Signal to the router guard that stores are ready

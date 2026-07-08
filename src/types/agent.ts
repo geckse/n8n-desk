@@ -34,6 +34,25 @@ export interface AgentApprovalResolvedEvent extends AgentEventBase {
   data: { id: string; decision: 'approve' | 'reject' }
 }
 
+/**
+ * User decision sent to `agent:approve` (mirrors electron/agent/approval.ts).
+ * `approve_always` approves the pending call and allows all future calls of
+ * that tool for the rest of the session; `reject` also stops the run. The
+ * `approval_resolved` EVENT stays `'approve' | 'reject'` — approve_always is
+ * translated to approve inside the runner.
+ */
+export type ApprovalDecision = 'approve' | 'approve_always' | 'reject'
+
+export interface AgentQuestionAskedEvent extends AgentEventBase {
+  type: 'question_asked'
+  data: { id: string; questions: AskUserQuestionItem[] }
+}
+
+export interface AgentQuestionAnsweredEvent extends AgentEventBase {
+  type: 'question_answered'
+  data: { id: string; answers: AskUserAnswers }
+}
+
 export interface AgentTodoUpdateEvent extends AgentEventBase {
   type: 'todo_update'
   data: { todos: AgentTodo[] }
@@ -66,10 +85,36 @@ export type AgentEvent =
   | AgentToolCallResultEvent
   | AgentApprovalRequiredEvent
   | AgentApprovalResolvedEvent
+  | AgentQuestionAskedEvent
+  | AgentQuestionAnsweredEvent
   | AgentTodoUpdateEvent
   | AgentErrorEvent
   | AgentDoneEvent
   | AgentWorkflowPreviewEvent
+
+// --- Ask User Question (mirrors electron/agent/ask-user-question.ts) ---
+
+export interface AskUserQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface AskUserQuestionItem {
+  id: string
+  question: string
+  options: AskUserQuestionOption[]
+  multiSelect?: boolean
+}
+
+export interface AskUserAnswerItem {
+  /** Selected option labels (empty when the user only used the "Other" field) */
+  selected: string[]
+  /** Free-text "Other" answer, when provided */
+  otherText?: string
+}
+
+/** Answers keyed by question id. */
+export type AskUserAnswers = Record<string, AskUserAnswerItem>
 
 // --- Agent Todos ---
 
@@ -96,7 +141,7 @@ export interface AgentToolCall {
   id: string
   name: string
   args: Record<string, unknown>
-  status: 'pending' | 'running' | 'awaiting_approval' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'awaiting_approval' | 'awaiting_input' | 'completed' | 'failed'
   result?: unknown
 }
 

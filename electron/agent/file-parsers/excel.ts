@@ -159,6 +159,20 @@ export async function readExcel(
 }
 
 /**
+ * Normalize cell values for JSON output: Date objects (from `cellDates`)
+ * become ISO 8601 strings instead of locale-dependent serial numbers.
+ */
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  for (const key of Object.keys(row)) {
+    const value = row[key]
+    if (value instanceof Date) {
+      row[key] = value.toISOString()
+    }
+  }
+  return row
+}
+
+/**
  * Parse an Excel buffer using the xlsx library.
  *
  * Extracted into a separate async function so it can be wrapped with a timeout.
@@ -172,8 +186,12 @@ async function parseExcelBuffer(
   // Lazy-load xlsx to avoid loading ~3MB for agents that don't need Excel
   const XLSX = await import('xlsx')
 
-  // Use XLSX.read(buffer) instead of XLSX.readFile() for ESM compatibility
-  const workbook = XLSX.read(buffer, { type: 'buffer' })
+  // Use XLSX.read(buffer) instead of XLSX.readFile() for ESM compatibility.
+  // cellDates gives real Date objects for date-formatted cells instead of
+  // opaque Excel serial numbers (audit #54). Formula cells keep their CACHED
+  // computed value (sheet_to_json reads `cell.v`) — the formula itself is not
+  // re-evaluated, which matches what the user sees in Excel.
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
 
   // Determine which sheets to process
   const sheetNames = resolveSheetNames(workbook.SheetNames, sheet)
@@ -186,7 +204,8 @@ async function parseExcelBuffer(
     if (!worksheet) continue
 
     // Convert sheet to JSON rows (default gives objects with header keys)
-    const allRows = XLSX.utils.sheet_to_json(worksheet) as Record<string, unknown>[]
+    const allRows = (XLSX.utils.sheet_to_json(worksheet) as Record<string, unknown>[])
+      .map(normalizeRow)
     const totalRows = allRows.length
 
     // Apply offset and limit for pagination

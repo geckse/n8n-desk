@@ -11,7 +11,7 @@
         <button
           :class="$style.errorClose"
           type="button"
-          aria-label="Dismiss error"
+          :aria-label="t('chat.input.dismissError')"
           @click="emit('dismissError')"
         >
           &times;
@@ -32,7 +32,7 @@
             <button
               :class="$style.fileTileRemove"
               type="button"
-              :aria-label="`Remove folder ${folder.label}`"
+              :aria-label="t('chat.input.removeFolder', { name: folder.label })"
               @click="removeFolder(folder.path)"
             >
               <X :size="10" />
@@ -53,7 +53,7 @@
             <button
               :class="$style.fileTileRemove"
               type="button"
-              :aria-label="`Remove ${file.fileName}`"
+              :aria-label="t('chat.input.removeFile', { name: file.fileName })"
               @click="removeFile(file.fileName)"
             >
               <X :size="10" />
@@ -79,7 +79,7 @@
               :class="$style.actionIconBtn"
               type="button"
               :disabled="isDisabled"
-              title="Attach a project folder"
+              :title="t('chat.input.attachFolder')"
               @click="handleOpenFolder"
             >
               <FolderPlus :size="16" />
@@ -89,7 +89,7 @@
               :class="$style.actionIconBtn"
               type="button"
               :disabled="isDisabled"
-              title="Attach files"
+              :title="t('chat.input.attachFiles')"
               @click="handleAttachFiles"
             >
               <Paperclip :size="16" />
@@ -99,7 +99,7 @@
             v-if="isStreaming"
             :class="$style.stopBtn"
             type="button"
-            aria-label="Stop generation"
+            :aria-label="t('chat.input.stop')"
             @click="emit('stop')"
           >
             <span :class="$style.stopIcon" />
@@ -109,7 +109,7 @@
             :class="$style.sendBtn"
             type="button"
             :disabled="!canSend"
-            aria-label="Send message"
+            :aria-label="t('chat.input.send')"
             @click="handleSend"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -124,6 +124,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { FolderPlus, Paperclip, X, FileText, FileSpreadsheet, FileImage } from 'lucide-vue-next'
 import type { AttachedFolder } from '@/types/session'
 import type { ChatAttachment } from '@/types/chathub'
@@ -144,6 +145,8 @@ const emit = defineEmits<{
   dismissError: []
 }>()
 
+const { t } = useI18n()
+
 const message = ref('')
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const attachedFolders = ref<AttachedFolder[]>([])
@@ -154,8 +157,8 @@ const isDisabled = computed(() => props.isOffline || props.disabled)
 const canSend = computed(() => message.value.trim().length > 0 && !isDisabled.value)
 
 const placeholderText = computed(() => {
-  if (props.isOffline) return 'Reconnect to continue…'
-  return 'Type a message…'
+  if (props.isOffline) return t('chat.input.reconnect')
+  return t('chat.input.typeMessage')
 })
 
 function fileIcon(filename: string) {

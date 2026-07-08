@@ -4,26 +4,19 @@ import path from 'path'
 import os from 'os'
 import type { AgentStreamEvent, AgentRunnerConfig, LlmProviderConfig, ConversationMessage } from '../agent/types'
 import { type AgentRunner } from '../agent/types'
-import { createAgentRunner, resolveLlmConfig } from '../agent/factory'
+import { createAgentRunner, resolveLlmConfig, LlmConfigError } from '../agent/factory'
+import { buildConversationHistory, parseSessionJsonl } from '../agent/conversation-history'
 import { refreshTokens } from '../oauth'
 import { pluginManager } from '../plugin-manager'
 import { loadAllSkills, buildSkillDescriptions } from '../skill-loader'
 import { buildCoworkPolicy, buildWorkflowPolicy } from '../agent/sandbox-policy'
-import { createFileTools } from '../agent/file-tools'
-import { jsComputeTool } from '../agent/js-sandbox'
 import { WORKFLOW_MODE_SYSTEM_PROMPT, COWORK_MODE_SYSTEM_PROMPT } from '../agent/system-prompts'
-import { callToolWithUrl } from '../mcp-client'
+import { callToolWithUrl, listToolsWithUrl, McpUnauthorizedError } from '../mcp-client'
+import { DESTRUCTIVE_TOOLS, COWORK_DENIED_TOOLS, type ApprovalDecision } from '../agent/approval'
+import { sanitizeAnswers } from '../agent/ask-user-question'
+import { readAlwaysAllowPresets } from '../agent/approval-presets'
 
 const BASE_DIR = path.join(os.homedir(), '.n8n-desk')
-
-/** Built-in n8n MCP tools that always require user approval before execution. */
-const DESTRUCTIVE_TOOLS = [
-  'create_workflow_from_code',
-  'update_workflow',
-  'publish_workflow',
-  'archive_workflow',
-  'execute_workflow',
-]
 
 // --- Active runners ---
 
@@ -34,6 +27,75 @@ interface ActiveRunner {
 }
 
 const activeRunners = new Map<string, ActiveRunner>()
+
+// --- Per-session "always allow" grants (approve_always) ---
+//
+// Keyed by sessionId, holding canonical tool names. The SAME Set instance is
+// passed into runnerConfig on every invoke — runners mutate it when the user
+// picks "Always allow this session", and because runners are recreated per
+// invoke, this map (not the runner) is what carries the grant across turns.
+// LRU-capped: session ids are random and never reused, so stale entries are
+// only a memory concern.
+
+const sessionAllowedTools = new Map<string, Set<string>>()
+const MAX_SESSION_ALLOW_SETS = 100
+
+function getSessionAllowSet(sessionId: string): Set<string> {
+  const existing = sessionAllowedTools.get(sessionId)
+  if (existing) {
+    // Re-insert for LRU ordering
+    sessionAllowedTools.delete(sessionId)
+    sessionAllowedTools.set(sessionId, existing)
+    return existing
+  }
+  const created = new Set<string>()
+  sessionAllowedTools.set(sessionId, created)
+  while (sessionAllowedTools.size > MAX_SESSION_ALLOW_SETS) {
+    const oldest = sessionAllowedTools.keys().next().value
+    if (oldest === undefined) break
+    sessionAllowedTools.delete(oldest)
+  }
+  return created
+}
+
+// --- Renderer event delivery ---
+
+/**
+ * Live window accessor (audit #15). Handlers register once for the app's
+ * lifetime, but on macOS the window is destroyed on close and recreated on
+ * dock-activate — a captured BrowserWindow reference would keep sending
+ * events to the destroyed instance. Resolve the CURRENT window per send.
+ */
+let getWindow: () => BrowserWindow | null = () => null
+
+function sendAgentEvent(event: AgentStreamEvent): void {
+  const win = getWindow()
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('agent:event', event)
+  }
+}
+
+/**
+ * Stop every active runner and emit terminal `done { cancelled }` events.
+ * Called on instance switch (audit #21) — agent sessions must never keep
+ * running against the previous instance's MCP server and tokens.
+ */
+export async function stopAllAgentRunners(): Promise<void> {
+  const entries = [...activeRunners.values()]
+  activeRunners.clear()
+  // Session approve_always grants do not survive an instance switch — the
+  // persistent presets are per-instance, and session grants follow suit.
+  sessionAllowedTools.clear()
+  await Promise.all(entries.map(async (active) => {
+    active.stopped = true
+    try {
+      await active.runner.stop(active.sessionId)
+    } catch (err) {
+      console.error(`[n8n-desk] Failed to stop runner for ${active.sessionId}:`, err)
+    }
+    sendAgentEvent({ sessionId: active.sessionId, type: 'done', data: { reason: 'cancelled' } })
+  }))
+}
 
 // --- Helpers ---
 
@@ -116,40 +178,68 @@ interface AuthMetadata {
 }
 
 /**
+ * Force-refresh the stored tokens for an instance/kind regardless of expiry.
+ * Returns the new access token, or null when refresh is impossible/failed
+ * (callers surface a re-auth prompt). Also used mid-session on 401 (audit #41).
+ */
+async function refreshStoredTokens(instanceId: string, kind: TokenKind): Promise<string | null> {
+  const tokens = await readTokensFor(instanceId, kind)
+  if (!tokens?.refresh_token) return null
+
+  const authMeta = await readJson<AuthMetadata>(authMetaPath(instanceId, kind))
+  if (!authMeta?.clientId || !authMeta.serverMetadata) return null
+
+  try {
+    console.log(`[n8n-desk] Refreshing ${kind} access token...`)
+    const tokenResponse = await refreshTokens(
+      authMeta.serverMetadata as unknown as Parameters<typeof refreshTokens>[0],
+      authMeta.clientId,
+      tokens.refresh_token,
+    )
+    await storeTokensFor(instanceId, kind, tokenResponse.access_token, tokenResponse.refresh_token)
+    authMeta.expiresAt = new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString()
+    await writeJson(authMetaPath(instanceId, kind), authMeta)
+    console.log(`[n8n-desk] ${kind} token refreshed successfully`)
+    return tokenResponse.access_token
+  } catch (err) {
+    console.error(`[n8n-desk] ${kind} token refresh failed:`, err)
+    return null
+  }
+}
+
+/**
  * Load tokens for a given kind and refresh proactively if within 60s of expiry.
  * Returns the (possibly refreshed) access token or null if unavailable.
  */
 async function loadAndRefresh(instanceId: string, kind: TokenKind): Promise<string | null> {
-  let tokens = await readTokensFor(instanceId, kind)
+  const tokens = await readTokensFor(instanceId, kind)
   if (!tokens?.access_token) return null
 
   const authMeta = await readJson<AuthMetadata>(authMetaPath(instanceId, kind))
   if (authMeta?.expiresAt && authMeta.clientId && authMeta.serverMetadata) {
     const expiresAt = new Date(authMeta.expiresAt).getTime()
-    const now = Date.now()
-    if (now >= expiresAt - 60_000) {
-      try {
-        console.log(`[n8n-desk] ${kind} access token expired, refreshing...`)
-        const tokenResponse = await refreshTokens(
-          authMeta.serverMetadata as Parameters<typeof refreshTokens>[0],
-          authMeta.clientId,
-          tokens.refresh_token,
-        )
-        await storeTokensFor(instanceId, kind, tokenResponse.access_token, tokenResponse.refresh_token)
-        authMeta.expiresAt = new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString()
-        await writeJson(authMetaPath(instanceId, kind), authMeta)
-        tokens = { access_token: tokenResponse.access_token, refresh_token: tokenResponse.refresh_token }
-        console.log(`[n8n-desk] ${kind} token refreshed successfully`)
-      } catch (err) {
-        console.error(`[n8n-desk] ${kind} token refresh failed:`, err)
-        // Return the expired token anyway — the server will return 401 and the
-        // renderer will surface the re-auth prompt.
-      }
+    if (Date.now() >= expiresAt - 60_000) {
+      const refreshed = await refreshStoredTokens(instanceId, kind)
+      if (refreshed) return refreshed
+      // Fall through with the expired token — the server will return 401 and
+      // the renderer will surface the re-auth prompt.
     }
   }
 
   return tokens.access_token
 }
+
+/** Result of the agent:mcp-status health check. */
+export interface McpStatusResult {
+  status: 'connected' | 'unauthorized' | 'unreachable' | 'not-configured'
+  toolCount?: number
+  isCustom?: boolean
+  instanceId?: string
+  error?: string
+}
+
+/** Health checks should fail fast — don't hold the banner for the full 30s list timeout. */
+const MCP_STATUS_TIMEOUT_MS = 10_000
 
 /** Thrown by readActiveInstanceConfig when a custom MCP URL is configured but not yet authorized. */
 export class CustomMcpNotAuthorizedError extends Error {
@@ -293,21 +383,6 @@ function extractWorkflowFromResult(result: unknown): { workflowId: string; name:
   return null
 }
 
-/** Tools whose results contain workflow metadata (workflowId) but NOT full workflow JSON. */
-const WORKFLOW_METADATA_TOOLS = [
-  'create_workflow_from_code',
-  'update_workflow',
-]
-
-/**
- * Check if a tool name matches one of the workflow metadata tools.
- * Handles both bare names ('create_workflow_from_code') and MCP-namespaced
- * names ('mcp__n8n__create_workflow_from_code') from the Claude Agent SDK.
- */
-function isWorkflowMetadataTool(toolName: string): boolean {
-  return WORKFLOW_METADATA_TOOLS.some((t) => toolName === t || toolName.endsWith(`__${t}`))
-}
-
 /**
  * Extract workflowId and name from an MCP tool result that contains only metadata.
  * Works for create_workflow_from_code / update_workflow which return
@@ -408,16 +483,21 @@ async function fetchWorkflowViaMcp(
 }
 
 /**
- * Read session JSONL and build conversation history for multi-turn memory.
- * Returns messages in chronological order, combining text chunks into
- * complete assistant messages.
+ * Read session JSONL and build faithful conversation history for multi-turn
+ * memory (audit #18): assistant text segments AND tool calls/results are
+ * folded into alternating user/assistant messages so identifiers created in
+ * earlier turns (workflow IDs, execution IDs) survive.
  *
  * @param sessionId - The session ID
  * @param mode - The agent mode ('workflow' | 'cowork'), determines session directory
+ * @param currentMessage - The message being sent right now. The renderer persists
+ *   it to JSONL before invoking, so it must be dropped from the history block —
+ *   otherwise the runners feed it to the model twice (history + prompt).
  */
 async function loadConversationHistory(
   sessionId: string,
   mode: 'workflow' | 'cowork' = 'workflow',
+  currentMessage?: string,
 ): Promise<ConversationMessage[]> {
   const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
   if (!config?.defaultInstanceId) return []
@@ -433,26 +513,7 @@ async function loadConversationHistory(
 
   try {
     const content = await fs.readFile(jsonlPath, 'utf-8')
-    const lines = content.trim().split('\n').filter(Boolean)
-    const history: ConversationMessage[] = []
-
-    for (const line of lines) {
-      try {
-        const msg = JSON.parse(line) as { role?: string; content?: string }
-        if (!msg.role || !msg.content) continue
-
-        if (msg.role === 'user') {
-          history.push({ role: 'user', content: msg.content })
-        } else if (msg.role === 'assistant' && msg.content) {
-          history.push({ role: 'assistant', content: msg.content })
-        }
-        // Skip tool messages — the agent sees tool results via MCP, not via history
-      } catch {
-        // Skip malformed lines
-      }
-    }
-
-    return history
+    return buildConversationHistory(parseSessionJsonl(content), currentMessage)
   } catch {
     return [] // File doesn't exist yet (first message in session)
   }
@@ -493,7 +554,15 @@ async function testLlmConnection(config: LlmProviderConfig): Promise<{ success: 
     } else if (provider === 'ollama') {
       const ollamaUrl = config.baseUrl || 'http://localhost:11434'
       const res = await fetch(`${ollamaUrl}/api/tags`)
-      return { success: res.ok }
+      if (!res.ok) return { success: false, error: `Ollama server responded with ${res.status}` }
+      // Many Ollama models cannot tool-call — surface that here instead of
+      // as a cryptic provider error mid-session (audit #28).
+      const { checkOllamaToolSupport } = await import('../agent/ollama-capabilities')
+      const support = await checkOllamaToolSupport(config.baseUrl, config.model)
+      if (support.supported === false) {
+        return { success: false, error: support.detail }
+      }
+      return { success: true }
     }
     return { success: false, error: `Unknown provider: ${provider}` }
   } catch (err) {
@@ -506,14 +575,26 @@ async function testLlmConnection(config: LlmProviderConfig): Promise<{ success: 
 
 let handlersRegistered = false
 
-export function registerAgentHandlers(mainWindow: BrowserWindow): void {
+/**
+ * Register agent IPC handlers ONCE for the app lifetime.
+ *
+ * Takes a window ACCESSOR, not a window: events must always go to the
+ * current window, or a macOS close/reopen would leave Cowork/Workflow modes
+ * silently dead (events sent to the destroyed window — audit #15).
+ */
+export function registerAgentHandlers(getMainWindow: () => BrowserWindow | null): void {
+  getWindow = getMainWindow
   if (handlersRegistered) return
   handlersRegistered = true
 
   /** Options passed from the renderer alongside sessionId and message. */
   interface AgentInvokeOptions {
-    /** Folders the user has attached to this session */
-    attachedFolders?: Array<{ path: string }>
+    /**
+     * Folders the user has attached to this session.
+     * `mode` is the user-chosen access level — it MUST be honored when
+     * building sandbox mounts (dropping it silently grants read-write).
+     */
+    attachedFolders?: Array<{ path: string; label?: string; mode?: 'ro' | 'rw' }>
     /** Individual files the user has attached to this message */
     attachedFiles?: string[]
     /** Agent mode — determines sandbox policy, system prompt, and session path */
@@ -524,17 +605,32 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
     const mode = options?.mode ?? 'workflow'
     const attachedFolders = options?.attachedFolders ?? []
     const attachedFiles = options?.attachedFiles ?? []
+    // Hoisted so the catch block can identity-check before cleanup
+    let invokeActive: ActiveRunner | undefined
     try {
-      const llmConfig = await resolveLlmConfig()
+      // Invalid backend/provider combinations (hand-edited llm.json, stale
+      // settings) throw LlmConfigError with an actionable message — surface
+      // it instead of a generic failure.
+      let llmConfig: Awaited<ReturnType<typeof resolveLlmConfig>>
+      try {
+        llmConfig = await resolveLlmConfig()
+      } catch (err) {
+        if (err instanceof LlmConfigError) {
+          sendAgentEvent({ sessionId, type: 'error', data: { message: err.message, code: 'LLM_CONFIG_INVALID' } })
+          sendAgentEvent({ sessionId, type: 'done', data: { reason: 'error' } })
+          return { success: false, error: err.message }
+        }
+        throw err
+      }
       if (!llmConfig) {
         const errorEvent: AgentStreamEvent = {
           sessionId,
           type: 'error',
           data: { message: 'No LLM configuration found. Please configure an LLM provider in Settings.' },
         }
-        mainWindow.webContents.send('agent:event', errorEvent)
+        sendAgentEvent(errorEvent)
         const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'error' } }
-        mainWindow.webContents.send('agent:event', doneEvent)
+        sendAgentEvent(doneEvent)
         return { success: false, error: 'No LLM configuration' }
       }
 
@@ -552,9 +648,9 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
               code: 'CUSTOM_MCP_NOT_AUTHORIZED',
             },
           }
-          mainWindow.webContents.send('agent:event', errorEvent)
+          sendAgentEvent(errorEvent)
           const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'error' } }
-          mainWindow.webContents.send('agent:event', doneEvent)
+          sendAgentEvent(doneEvent)
           return { success: false, error: 'Custom MCP not authorized' }
         }
         throw err
@@ -565,21 +661,24 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
           type: 'error',
           data: { message: 'No active n8n instance configured. Please connect to an instance first.' },
         }
-        mainWindow.webContents.send('agent:event', errorEvent)
+        sendAgentEvent(errorEvent)
         const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'error' } }
-        mainWindow.webContents.send('agent:event', doneEvent)
+        sendAgentEvent(doneEvent)
         return { success: false, error: 'No active instance' }
       }
 
-      // Stop existing runner for this session if any
+      // Stop existing runner for this session if any. Mark it stopped FIRST so
+      // its still-draining IIFE stops forwarding events for this session.
       const existing = activeRunners.get(sessionId)
       if (existing) {
+        existing.stopped = true
         await existing.runner.stop(sessionId)
         activeRunners.delete(sessionId)
       }
 
-      // Determine backend based on LLM provider
-      const backend = llmConfig.provider === 'anthropic' ? 'claude-sdk' : 'deep-agents'
+      // Backend comes from the configured `backend` field in llm.json — never
+      // derived from the provider (Anthropic runs on either backend).
+      const backend = llmConfig.backend
       const runner = createAgentRunner(backend)
 
       const active: ActiveRunner = {
@@ -587,6 +686,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         runner,
         stopped: false,
       }
+      invokeActive = active
       activeRunners.set(sessionId, active)
 
       // --- Sandbox Policy & File Tools ---
@@ -595,14 +695,19 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       // If no folders are attached, the policy still grants read access to
       // ~/.n8n-desk/ (minus sensitive files) and write access to skills/.
       //
-      // Individually attached files: add their parent directories as read-only
+      // Individually attached files: add their parent directories as READ-ONLY
       // mounts so the agent can read them. The agent is told the exact paths
       // in the system prompt — it won't browse the parent dirs randomly.
       const fileFolderMounts = attachedFiles.map((fp) => ({
         path: path.dirname(fp),
+        mode: 'ro' as const,
       }))
-      // Deduplicate: merge file parent dirs with explicit folder mounts
-      const allMountFolders = [...attachedFolders]
+      // Deduplicate: merge file parent dirs with explicit folder mounts.
+      // The user-chosen per-folder mode is preserved (defaults to 'rw' in the
+      // policy builder when absent).
+      const allMountFolders: Array<{ path: string; mode?: 'ro' | 'rw' }> = attachedFolders.map(
+        (f) => ({ path: f.path, mode: f.mode }),
+      )
       for (const fm of fileFolderMounts) {
         if (!allMountFolders.some((f) => f.path === fm.path)) {
           allMountFolders.push(fm)
@@ -612,10 +717,6 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       const sandboxPolicy = mode === 'cowork'
         ? buildCoworkPolicy(allMountFolders, BASE_DIR)
         : buildWorkflowPolicy(allMountFolders, BASE_DIR)
-
-      // Create sandboxed file tools (13 format tools) and include jsComputeTool.
-      // These are always available — they do NOT require approval.
-      const fileTools = createFileTools(sandboxPolicy)
 
       // --- Plugin & Skill Integration ---
 
@@ -629,14 +730,10 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         ? await pluginManager.buildDeepAgentsTools(instanceId)
         : undefined
 
-      // Merge file tools + jsComputeTool + plugin tools into a single array.
-      // File tools and jsComputeTool are always included; plugin tools are
-      // only included for the Deep Agents backend (Claude SDK uses MCP servers).
-      const customTools = [
-        ...fileTools,
-        jsComputeTool,
-        ...(pluginTools ?? []),
-      ]
+      // Plugin tools only — the runners construct file tools + js_compute from
+      // sandboxPolicy themselves. Passing them here too registered every file
+      // tool twice (strict providers reject duplicate tool names).
+      const customTools = [...(pluginTools ?? [])]
 
       // Load all skills and filter to auto-invocable ones.
       // Skills with disableModelInvocation=true are only invocable via /skill-name
@@ -649,9 +746,26 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         ? COWORK_MODE_SYSTEM_PROMPT
         : WORKFLOW_MODE_SYSTEM_PROMPT
 
+      // Inject the current date and environment (audit #44) — without it the
+      // model dates schedules and reports from its training cutoff.
+      const platformName = process.platform === 'darwin' ? 'macOS'
+        : process.platform === 'win32' ? 'Windows' : 'Linux'
+      const currentDate = new Intl.DateTimeFormat('en-US', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      }).format(new Date())
+      let contextBlock = `\n\n## Environment\n- Current date: ${currentDate}\n- Platform: ${platformName} (desktop app: n8n-desk)\n- Connected n8n instance: ${instanceConfig.url}`
+
+      // Cross-session memory (audit #45): inject saved notes so multi-day
+      // continuity doesn't depend on the agent thinking to call memory_read.
+      const memoryFilePath = path.join(BASE_DIR, 'instances', instanceId, 'memory.json')
+      const { readMemoryEntries, buildMemoryPromptBlock } = await import('../agent/memory-tools')
+      const memoryBlock = buildMemoryPromptBlock(await readMemoryEntries(memoryFilePath))
+      if (memoryBlock) {
+        contextBlock += `\n\n${memoryBlock}`
+      }
+
       // Inject attached folder and file paths into the system prompt so the
       // agent knows which resources are available for file tools.
-      let contextBlock = ''
       if (attachedFolders.length > 0) {
         const folderList = attachedFolders
           .map((f) => `- ${f.path}`)
@@ -701,23 +815,39 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         ...approvalToolNames,
       ]
 
+      // Persistent per-instance always-allow presets (tool-approvals.json,
+      // written by the Settings UI). Read fresh every invoke so preset
+      // changes apply from the next message without a restart.
+      const alwaysAllowedTools = await readAlwaysAllowPresets(BASE_DIR, instanceId)
+
       // Load conversation history for multi-turn memory
-      const conversationHistory = await loadConversationHistory(sessionId, mode)
+      const conversationHistory = await loadConversationHistory(sessionId, mode, message)
       console.log(`[n8n-desk] Loaded ${conversationHistory.length} messages from session history`)
+
+      // Mid-session 401 recovery (audit #41): the MCP token kind matches the
+      // channel in use — custom MCP servers have their own OAuth tokens.
+      const mcpTokenKind: TokenKind = instanceConfig.mcp.isCustom ? 'mcp' : 'n8n'
 
       const runnerConfig: AgentRunnerConfig = {
         instanceUrl: instanceConfig.url,
         accessToken: instanceConfig.accessToken,
         mcpUrl: instanceConfig.mcp.url,
         mcpAccessToken: instanceConfig.mcp.accessToken,
+        refreshMcpToken: () => refreshStoredTokens(instanceId, mcpTokenKind),
         llmConfig,
         systemPrompt: augmentedPrompt,
         interruptOnTools,
+        // Cowork must not manage the workflow lifecycle — enforced in both
+        // runners, not just stated in the prompt (audit #12).
+        deniedTools: mode === 'cowork' ? COWORK_DENIED_TOOLS : [],
         customMcpServers,
         customTools,
         skills: autoInvocableSkills,
         conversationHistory,
         sandboxPolicy,
+        memoryFilePath,
+        sessionAllowedTools: getSessionAllowSet(sessionId),
+        alwaysAllowedTools,
       }
 
       console.log('[n8n-desk] System prompt:\n', augmentedPrompt)
@@ -728,7 +858,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         try {
           for await (const event of runner.invoke(sessionId, message, runnerConfig)) {
             if (active.stopped) break
-            mainWindow.webContents.send('agent:event', event)
+            sendAgentEvent(event)
             // NOTE: Session messages are persisted by the renderer's Pinia store
             // (via persistMessage). Do NOT also persist here — that causes duplicates.
 
@@ -745,7 +875,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
                   sessionId,
                   data: { ...extracted, toolCallId: event.data.id },
                 }
-                mainWindow.webContents.send('agent:event', previewEvent)
+                sendAgentEvent(previewEvent)
               } else {
                 // No full workflow in result — check if it contains workflow metadata
                 // (workflowId). This handles create_workflow_from_code and update_workflow
@@ -771,7 +901,7 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
                         workflow,
                       },
                     }
-                    mainWindow.webContents.send('agent:event', previewEvent)
+                    sendAgentEvent(previewEvent)
                   }).catch((err) => {
                     console.error(`[n8n-desk] Failed to fetch workflow for preview:`, err)
                   })
@@ -787,11 +917,16 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
             type: 'error',
             data: { message: errMessage },
           }
-          mainWindow.webContents.send('agent:event', errorEvent)
+          sendAgentEvent(errorEvent)
           const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'error' } }
-          mainWindow.webContents.send('agent:event', doneEvent)
+          sendAgentEvent(doneEvent)
         } finally {
-          activeRunners.delete(sessionId)
+          // Identity check: a second invoke may have replaced this runner.
+          // Deleting unconditionally would orphan the replacement (it could
+          // no longer be stopped or approved).
+          if (activeRunners.get(sessionId) === active) {
+            activeRunners.delete(sessionId)
+          }
         }
       })()
 
@@ -803,10 +938,14 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
         type: 'error',
         data: { message: errMessage },
       }
-      mainWindow.webContents.send('agent:event', errorEvent)
+      sendAgentEvent(errorEvent)
       const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'error' } }
-      mainWindow.webContents.send('agent:event', doneEvent)
-      activeRunners.delete(sessionId)
+      sendAgentEvent(doneEvent)
+      // The runner registered above never started streaming — remove it, but
+      // only if it is still the registered one (identity check).
+      if (invokeActive && activeRunners.get(sessionId) === invokeActive) {
+        activeRunners.delete(sessionId)
+      }
       return { success: false, error: errMessage }
     }
   })
@@ -817,35 +956,266 @@ export function registerAgentHandlers(mainWindow: BrowserWindow): void {
       active.stopped = true
       await active.runner.stop(sessionId)
       activeRunners.delete(sessionId)
-      const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'cancelled' } }
-      mainWindow.webContents.send('agent:event', doneEvent)
     }
+    // ALWAYS emit the terminal done — even when no runner is registered.
+    // The renderer keys its running state on this event; if a prior terminal
+    // event was lost (window recreated, runner crashed), stop is the user's
+    // escape hatch and must unlock the session unconditionally.
+    const doneEvent: AgentStreamEvent = { sessionId, type: 'done', data: { reason: 'cancelled' } }
+    sendAgentEvent(doneEvent)
     return { success: true }
   })
 
-  ipcMain.handle('agent:approve', async (_event, sessionId: string, decision: 'approve' | 'reject') => {
+  // Instance switch: agent sessions must never keep running against the
+  // previous instance's MCP server and tokens (audit #21).
+  ipcMain.handle('agent:stop-all', async () => {
+    await stopAllAgentRunners()
+    return { success: true }
+  })
+
+  ipcMain.handle('agent:approve', async (_event, sessionId: string, approvalId: string, decision: ApprovalDecision) => {
+    // Defensive whitelist — the decision reaches runner internals.
+    if (!['approve', 'approve_always', 'reject'].includes(decision)) {
+      return { success: false, error: 'Invalid decision' }
+    }
+
     const active = activeRunners.get(sessionId)
     if (!active) {
       return { success: false, error: 'No active runner for session' }
     }
 
-    await active.runner.approve(sessionId, decision)
-
-    const resolvedEvent: AgentStreamEvent = {
-      sessionId,
-      type: 'approval_resolved',
-      data: { id: 'latest', decision },
+    // The runner is the single emitter of `approval_resolved` (with the real
+    // approval id) — no synthetic event here.
+    const resolved = await active.runner.approve(sessionId, approvalId, decision)
+    if (!resolved) {
+      return { success: false, error: 'No pending approval matched' }
     }
-    mainWindow.webContents.send('agent:event', resolvedEvent)
+
+    return { success: true }
+  })
+
+  ipcMain.handle('agent:answer', async (_event, sessionId: string, questionId: string, answers: unknown) => {
+    const active = activeRunners.get(sessionId)
+    if (!active) {
+      return { success: false, error: 'No active runner for session' }
+    }
+
+    // The renderer payload is untrusted — coerce before it reaches the runner
+    // (and, on the Deep Agents backend, the LangGraph resume path).
+    const sanitized = sanitizeAnswers(answers)
+
+    // The runner is the single emitter of `question_answered` (with the real
+    // question id) — no synthetic event here.
+    const resolved = await active.runner.answer(sessionId, questionId, sanitized)
+    if (!resolved) {
+      return { success: false, error: 'No pending question matched' }
+    }
 
     return { success: true }
   })
 
   ipcMain.handle('agent:test-connection', async () => {
-    const llmConfig = await resolveLlmConfig()
+    let llmConfig: Awaited<ReturnType<typeof resolveLlmConfig>>
+    try {
+      llmConfig = await resolveLlmConfig()
+    } catch (err) {
+      if (err instanceof LlmConfigError) {
+        return { success: false, error: err.message }
+      }
+      throw err
+    }
     if (!llmConfig) {
       return { success: false, error: 'No LLM configuration found' }
     }
     return testLlmConnection(llmConfig)
+  })
+
+  // Health check for the MCP endpoint the agent modes depend on. Resolves the
+  // same URL + token pair as agent:invoke (default `${url}/mcp-server/http`
+  // with the n8n OAuth token, or the custom mcpServerUrl with its own token)
+  // and performs a real tools/list round-trip. On 401 it force-refreshes the
+  // stored tokens once and retries, so a stale expiry doesn't read as broken.
+  ipcMain.handle('agent:mcp-status', async (_event, instanceId?: string): Promise<McpStatusResult> => {
+    let id = instanceId ?? null
+    if (!id) {
+      const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
+      id = config?.defaultInstanceId ?? null
+    }
+    if (!id) return { status: 'not-configured' }
+
+    const instance = await readJson<{ url: string; mcpServerUrl?: string }>(
+      path.join(BASE_DIR, 'instances', id, 'instance.json'),
+    )
+    if (!instance?.url) return { status: 'not-configured', instanceId: id }
+
+    const isCustom = Boolean(instance.mcpServerUrl)
+    const kind: TokenKind = isCustom ? 'mcp' : 'n8n'
+    const mcpUrl = isCustom
+      ? instance.mcpServerUrl!.replace(/\/+$/, '')
+      : `${instance.url.replace(/\/+$/, '')}/mcp-server/http`
+
+    const accessToken = await loadAndRefresh(id, kind)
+    if (!accessToken) {
+      return { status: 'unauthorized', isCustom, instanceId: id }
+    }
+
+    const probe = async (token: string): Promise<McpStatusResult> => {
+      const tools = await listToolsWithUrl(
+        mcpUrl,
+        { Authorization: `Bearer ${token}` },
+        { timeoutMs: MCP_STATUS_TIMEOUT_MS },
+      )
+      return { status: 'connected', toolCount: tools.length, isCustom, instanceId: id }
+    }
+
+    try {
+      return await probe(accessToken)
+    } catch (err) {
+      if (err instanceof McpUnauthorizedError) {
+        const refreshed = await refreshStoredTokens(id, kind)
+        if (refreshed) {
+          try {
+            return await probe(refreshed)
+          } catch (retryErr) {
+            if (retryErr instanceof McpUnauthorizedError) {
+              return { status: 'unauthorized', isCustom, instanceId: id }
+            }
+            return {
+              status: 'unreachable',
+              isCustom,
+              instanceId: id,
+              error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+            }
+          }
+        }
+        return { status: 'unauthorized', isCustom, instanceId: id }
+      }
+      return {
+        status: 'unreachable',
+        isCustom,
+        instanceId: id,
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+  })
+
+  // Full tool catalog across the n8n MCP server and all enabled custom
+  // servers — powers the Settings > Tool approvals section. Read-only; each
+  // server is probed independently so one offline server doesn't hide the
+  // rest. Entry `key` is the canonical allowlist key stored in
+  // tool-approvals.json (bare for n8n tools, `{server}__{tool}` for custom).
+  interface McpToolCatalogEntry {
+    name: string
+    key: string
+    description?: string
+    /** True when this tool would prompt for approval without a preset. */
+    gated: boolean
+    /** True for the static destructive n8n tool set — warn in the UI. */
+    destructive: boolean
+  }
+  interface McpToolCatalog {
+    instanceId: string | null
+    n8n: { reachable: boolean; error?: string; tools: McpToolCatalogEntry[] }
+    customServers: Array<{
+      serverName: string
+      requireApproval: boolean
+      reachable: boolean
+      error?: string
+      tools: McpToolCatalogEntry[]
+    }>
+  }
+
+  ipcMain.handle('agent:list-mcp-tools', async (_event, instanceId?: string): Promise<McpToolCatalog> => {
+    let id = instanceId ?? null
+    if (!id) {
+      const config = await readJson<{ defaultInstanceId?: string }>(path.join(BASE_DIR, 'config.json'))
+      id = config?.defaultInstanceId ?? null
+    }
+
+    const catalog: McpToolCatalog = {
+      instanceId: id,
+      n8n: { reachable: false, tools: [] },
+      customServers: [],
+    }
+    if (!id) {
+      catalog.n8n.error = 'No active n8n instance configured.'
+      return catalog
+    }
+
+    // --- n8n server tools (same URL/token resolution as agent:mcp-status) ---
+    const instance = await readJson<{ url: string; mcpServerUrl?: string }>(
+      path.join(BASE_DIR, 'instances', id, 'instance.json'),
+    )
+    if (!instance?.url) {
+      catalog.n8n.error = 'Instance is not configured.'
+    } else {
+      const isCustom = Boolean(instance.mcpServerUrl)
+      const kind: TokenKind = isCustom ? 'mcp' : 'n8n'
+      const mcpUrl = isCustom
+        ? instance.mcpServerUrl!.replace(/\/+$/, '')
+        : `${instance.url.replace(/\/+$/, '')}/mcp-server/http`
+      const accessToken = await loadAndRefresh(id, kind)
+      if (!accessToken) {
+        catalog.n8n.error = 'Not signed in to this instance.'
+      } else {
+        try {
+          const tools = await listToolsWithUrl(
+            mcpUrl,
+            { Authorization: `Bearer ${accessToken}` },
+            { timeoutMs: MCP_STATUS_TIMEOUT_MS },
+          )
+          catalog.n8n.reachable = true
+          catalog.n8n.tools = tools.map((t) => {
+            const destructive = DESTRUCTIVE_TOOLS.includes(t.name)
+            return {
+              name: t.name,
+              key: t.name,
+              description: t.description,
+              gated: destructive || t.annotations?.readOnlyHint === false,
+              destructive,
+            }
+          })
+        } catch (err) {
+          catalog.n8n.error = err instanceof Error ? err.message : String(err)
+        }
+      }
+    }
+
+    // --- Custom / plugin server tools ---
+    try {
+      const servers = await pluginManager.buildClaudeSdkMcpServers(id)
+      const approvalServers = new Set(await pluginManager.getApprovalRequiredServerNames(id))
+      for (const [serverName, serverConfig] of Object.entries(servers)) {
+        if (serverName === 'n8n') continue // reserved
+        const requireApproval = approvalServers.has(serverName)
+        try {
+          const discovered = await pluginManager.discoverTools(serverConfig.url, serverConfig.headers)
+          catalog.customServers.push({
+            serverName,
+            requireApproval,
+            reachable: true,
+            tools: discovered.map((t) => ({
+              name: t.name,
+              key: `${serverName}__${t.name}`,
+              description: t.description,
+              gated: requireApproval,
+              destructive: false,
+            })),
+          })
+        } catch (err) {
+          catalog.customServers.push({
+            serverName,
+            requireApproval,
+            reachable: false,
+            error: err instanceof Error ? err.message : String(err),
+            tools: [],
+          })
+        }
+      }
+    } catch (err) {
+      console.error('[n8n-desk] Failed to enumerate custom MCP servers:', err)
+    }
+
+    return catalog
   })
 }

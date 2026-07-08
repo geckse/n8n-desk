@@ -3,7 +3,8 @@ import { IonInput, IonSelect, IonSelectOption, IonButton } from '@ionic/vue'
 import { ref, reactive, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  Settings as SettingsIcon, Trash2, Bot, Zap, Plug, Package,
+  Settings as SettingsIcon, Trash2, Bot, Zap, Plug, Package, ShieldCheck,
+  CheckCircle2, TriangleAlert, RefreshCw, Loader2,
 } from 'lucide-vue-next'
 import SettingsModal from '@/components/ui/SettingsModal.vue'
 import SettingsNavGroup from '@/components/ui/SettingsNavGroup.vue'
@@ -12,11 +13,15 @@ import LlmSettings from '@/components/settings/LlmSettings.vue'
 import SkillsSettings from '@/components/settings/SkillsSettings.vue'
 import ConnectorsSettings from '@/components/settings/ConnectorsSettings.vue'
 import PluginsSettings from '@/components/settings/PluginsSettings.vue'
+import ToolApprovalSettings from '@/components/settings/ToolApprovalSettings.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useInstancesStore } from '@/stores/instances'
 import { useAuthStore } from '@/stores/auth'
 import { useTheme } from '@/composables/useTheme'
+import { useInstanceReconnect } from '@/composables/useInstanceReconnect'
+import { useInstanceSwitch } from '@/composables/useInstanceSwitch'
 import type { ThemeMode, SupportedLocale } from '@/types/settings'
+import type { McpStatusResult } from '@/types/mcp'
 
 const props = defineProps<{
   isOpen: boolean
@@ -72,6 +77,173 @@ const selectedInstanceId = computed(() => {
 const selectedInstanceDraft = computed(() => {
   if (!selectedInstanceId.value) return null
   return draft.instances.find((i) => i.id === selectedInstanceId.value) ?? null
+})
+
+// --- Instance connection status + reconnect ---
+const { reconnect, isReconnecting } = useInstanceReconnect()
+const { switchTo } = useInstanceSwitch()
+
+type InstanceConnStatus = McpStatusResult['status'] | 'checking' | 'unknown'
+const connStatus = ref<InstanceConnStatus>('unknown')
+const connToolCount = ref<number | null>(null)
+const connError = ref<string | null>(null)
+
+// --- n8n account (session cookie) status — the Chat-mode connection ---
+type AccountConnStatus = 'unknown' | 'checking' | 'connected' | 'expired' | 'none' | 'unreachable'
+const accountStatus = ref<AccountConnStatus>('unknown')
+const accountEmail = ref<string | null>(null)
+
+/**
+ * Probe GET /rest/login ("check if the user is already logged in") with the
+ * instance's stored session cookie. Works for non-active instances too — the
+ * token is read per-instance instead of from the auth store.
+ */
+async function checkAccountConnection(id: string): Promise<void> {
+  if (!window.n8nDesk) return
+  accountStatus.value = 'checking'
+  accountEmail.value = null
+
+  const inst = instancesStore.getInstance(id)
+  if (!inst) return
+
+  const token = await window.n8nDesk.auth.getSessionToken(id)
+  if (!token) {
+    if (selectedInstanceId.value === id) accountStatus.value = 'none'
+    return
+  }
+
+  const browserId = await window.n8nDesk.auth.getBrowserId(id)
+  try {
+    const res = await window.n8nDesk.api.fetch(`${inst.url.replace(/\/+$/, '')}/rest/login`, {
+      method: 'GET',
+      headers: {
+        Cookie: `n8n-auth=${token}`,
+        ...(browserId ? { 'browser-id': browserId } : {}),
+      },
+      timeoutMs: 10000,
+    })
+    if (selectedInstanceId.value !== id) return // user switched panes mid-check
+
+    if (res.status >= 200 && res.status < 300) {
+      accountStatus.value = 'connected'
+      try {
+        const parsed = JSON.parse(res.body) as { data?: { email?: string } }
+        accountEmail.value = parsed.data?.email ?? null
+      } catch {
+        accountEmail.value = null
+      }
+    } else if (res.status === 401 || res.status === 403) {
+      accountStatus.value = 'expired'
+    } else {
+      accountStatus.value = 'unreachable'
+    }
+  } catch {
+    if (selectedInstanceId.value === id) accountStatus.value = 'unreachable'
+  }
+}
+
+/**
+ * Raise the credential sign-in modal for this instance. For a non-active
+ * instance the swap happens first — its session validation raises the
+ * "session expired" modal on its own when the session is dead.
+ */
+async function signInToAccount(id: string): Promise<void> {
+  const wasExpired = accountStatus.value === 'expired'
+  cancel() // close settings (reverts theme preview)
+  if (instancesStore.activeInstanceId !== id) {
+    await switchTo(id)
+    if (authStore.sessionExpired) return // swap validation already raised the modal
+  }
+  if (wasExpired) {
+    authStore.markSessionExpired()
+  } else {
+    authStore.requestReLogin()
+  }
+}
+
+const accountStatusLabel = computed(() => {
+  switch (accountStatus.value) {
+    case 'checking':
+      return t('settings.connection.statusChecking')
+    case 'connected':
+      return accountEmail.value
+        ? t('settings.connection.statusSignedInAs', { email: accountEmail.value })
+        : t('settings.connection.statusSignedIn')
+    case 'expired':
+      return t('settings.connection.statusSessionExpired')
+    case 'none':
+      return t('settings.connection.statusNotSignedIn')
+    case 'unreachable':
+      return t('settings.connection.statusInstanceUnreachable')
+    default:
+      return ''
+  }
+})
+
+async function checkInstanceConnection(id: string): Promise<void> {
+  if (!window.n8nDesk) return
+  connStatus.value = 'checking'
+  connToolCount.value = null
+  connError.value = null
+  try {
+    const result = await window.n8nDesk.agent.mcpStatus(id)
+    if (selectedInstanceId.value !== id) return // user switched panes mid-check
+    connStatus.value = result.status
+    connToolCount.value = result.toolCount ?? null
+    connError.value = result.error ?? null
+  } catch (err) {
+    if (selectedInstanceId.value !== id) return
+    connStatus.value = 'unreachable'
+    connError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function reconnectInstance(id: string): Promise<void> {
+  connError.value = null
+  const result = await reconnect(id)
+  if (selectedInstanceId.value !== id) return
+  if (!result.success && result.error) {
+    connError.value = result.error
+  }
+  await checkInstanceConnection(id)
+}
+
+// Check whenever an instance pane becomes visible.
+watch(
+  () => [props.isOpen, selectedInstanceId.value] as const,
+  ([open, id]) => {
+    if (open && id) {
+      void checkInstanceConnection(id)
+      void checkAccountConnection(id)
+    } else {
+      connStatus.value = 'unknown'
+      connToolCount.value = null
+      connError.value = null
+      accountStatus.value = 'unknown'
+      accountEmail.value = null
+    }
+  },
+  { immediate: true },
+)
+
+const connStatusLabel = computed(() => {
+  if (isReconnecting.value) return t('settings.connection.statusReconnecting')
+  switch (connStatus.value) {
+    case 'checking':
+      return t('settings.connection.statusChecking')
+    case 'connected':
+      return connToolCount.value !== null
+        ? t('settings.connection.statusConnectedTools', { count: connToolCount.value })
+        : t('settings.connection.statusConnected')
+    case 'unauthorized':
+      return t('settings.connection.statusUnauthorized')
+    case 'unreachable':
+      return t('settings.connection.statusUnreachable')
+    case 'not-configured':
+      return t('settings.connection.statusNotConfigured')
+    default:
+      return ''
+  }
 })
 
 // --- Theme preview (apply theme live while editing) ---
@@ -157,6 +329,13 @@ function getHostname(url: string): string {
           {{ t('settings.sections.aiAgent') }}
         </SettingsNavItem>
         <SettingsNavItem
+          :active="activeSection === 'toolApprovals'"
+          @click="activeSection = 'toolApprovals'"
+        >
+          <template #icon><ShieldCheck :size="16" /></template>
+          {{ t('settings.sections.toolApprovals') }}
+        </SettingsNavItem>
+        <SettingsNavItem
           :active="activeSection === 'skills'"
           @click="activeSection = 'skills'"
         >
@@ -192,7 +371,6 @@ function getHostname(url: string): string {
           {{ inst.label || getHostname(inst.url) }}
         </SettingsNavItem>
       </SettingsNavGroup>
-
     </template>
 
     <!-- Content -->
@@ -240,6 +418,11 @@ function getHostname(url: string): string {
         <h3 class="section-title">{{ t('settings.sections.aiAgent') }}</h3>
         <p class="section-description">{{ t('settings.ai.description') }}</p>
         <LlmSettings />
+      </div>
+
+      <!-- Tool Approvals -->
+      <div v-else-if="activeSection === 'toolApprovals'" class="section-content">
+        <ToolApprovalSettings />
       </div>
 
       <!-- Skills -->
@@ -298,6 +481,84 @@ function getHostname(url: string): string {
               />
             </div>
           </div>
+        </div>
+
+        <div class="section-group">
+          <div class="section-group-label">{{ t('settings.connection.title') }}</div>
+          <p class="connection-description">{{ t('settings.connection.description') }}</p>
+
+          <!-- n8n account session — Chat mode -->
+          <div class="connection-row">
+            <div class="connection-main">
+              <div class="connection-name">
+                <Loader2
+                  v-if="accountStatus === 'checking'"
+                  :size="15"
+                  class="connection-icon connection-icon--spin"
+                />
+                <CheckCircle2
+                  v-else-if="accountStatus === 'connected'"
+                  :size="15"
+                  class="connection-icon connection-icon--ok"
+                />
+                <TriangleAlert
+                  v-else
+                  :size="15"
+                  class="connection-icon connection-icon--warn"
+                />
+                <span>{{ t('settings.connection.accountLabel') }}</span>
+              </div>
+              <p class="connection-hint">{{ t('settings.connection.accountHint') }}</p>
+              <p class="connection-status-text">{{ accountStatusLabel }}</p>
+            </div>
+
+            <ion-button
+              v-if="accountStatus === 'expired' || accountStatus === 'none'"
+              fill="outline"
+              size="small"
+              @click="signInToAccount(selectedInstanceDraft.id)"
+            >
+              {{ t('settings.connection.signIn') }}
+            </ion-button>
+          </div>
+
+          <!-- MCP server — Cowork & Workflow mode -->
+          <div class="connection-row">
+            <div class="connection-main">
+              <div class="connection-name">
+                <Loader2
+                  v-if="connStatus === 'checking' || isReconnecting"
+                  :size="15"
+                  class="connection-icon connection-icon--spin"
+                />
+                <CheckCircle2
+                  v-else-if="connStatus === 'connected'"
+                  :size="15"
+                  class="connection-icon connection-icon--ok"
+                />
+                <TriangleAlert
+                  v-else
+                  :size="15"
+                  class="connection-icon connection-icon--warn"
+                />
+                <span>{{ t('settings.connection.mcpLabel') }}</span>
+              </div>
+              <p class="connection-hint">{{ t('settings.connection.mcpHint') }}</p>
+              <p class="connection-status-text">{{ connStatusLabel }}</p>
+            </div>
+
+            <ion-button
+              fill="outline"
+              size="small"
+              :disabled="isReconnecting || connStatus === 'checking'"
+              @click="reconnectInstance(selectedInstanceDraft.id)"
+            >
+              <RefreshCw :size="14" style="margin-right: 6px;" />
+              {{ t('settings.connection.reconnect') }}
+            </ion-button>
+          </div>
+
+          <p v-if="connError" class="connection-error">{{ connError }}</p>
         </div>
 
         <div class="section-group section-group--danger">
@@ -409,6 +670,86 @@ function getHostname(url: string): string {
     border-color: var(--color--text);
     transform: scale(1.15);
   }
+}
+
+// --- Connection ---
+.connection-description {
+  font-size: var(--font-size--sm);
+  color: var(--color--text--tint-1);
+  margin: 0 0 var(--spacing--sm);
+}
+
+.connection-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing--sm);
+  padding: var(--spacing--sm);
+  border: 1px solid var(--border-color--subtle);
+  border-radius: var(--radius--sm);
+
+  & + & {
+    margin-top: var(--spacing--sm);
+  }
+
+  ion-button {
+    flex-shrink: 0;
+  }
+}
+
+.connection-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.connection-name {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing--xs);
+  font-size: var(--font-size--sm);
+  font-weight: var(--font-weight--medium);
+  color: var(--color--text);
+}
+
+.connection-hint {
+  font-size: var(--font-size--2xs);
+  color: var(--color--text--tint-1);
+  margin: 0;
+}
+
+.connection-status-text {
+  font-size: var(--font-size--2xs);
+  color: var(--color--text);
+  margin: var(--spacing--3xs) 0 0;
+}
+
+.connection-icon {
+  flex-shrink: 0;
+
+  &--ok {
+    color: var(--color--success);
+  }
+
+  &--warn {
+    color: var(--color--warning);
+  }
+
+  &--spin {
+    animation: connection-spin 1s linear infinite;
+  }
+}
+
+@keyframes connection-spin {
+  to { transform: rotate(360deg); }
+}
+
+.connection-error {
+  font-size: var(--font-size--2xs);
+  color: var(--color--danger);
+  margin: var(--spacing--xs) 0 0;
+  word-break: break-word;
 }
 
 // --- Danger Zone ---

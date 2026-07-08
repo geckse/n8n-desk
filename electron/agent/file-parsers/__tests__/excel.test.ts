@@ -293,3 +293,30 @@ describe('Excel error handling', () => {
     expect(result.sizeBytes).toBeGreaterThan(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Date fidelity (audit #54)
+// ---------------------------------------------------------------------------
+
+describe('Excel date fidelity', () => {
+  it('returns date-formatted cells as ISO strings, not serial numbers', async () => {
+    const XLSX = await import('xlsx')
+    const filePath = path.join(tmpDir, 'dates.xlsx')
+
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ['Invoice', 'Due'],
+      ['INV-1', new Date(Date.UTC(2026, 6, 15))],
+    ], { cellDates: true })
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Sheet1')
+    await fs.writeFile(filePath, XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer)
+
+    const result = await readExcel(filePath)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      const due = result.sheets[0].rows[0]['Due']
+      expect(typeof due).toBe('string')
+      expect(due).toContain('2026-07-15')
+    }
+  })
+})

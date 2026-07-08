@@ -120,8 +120,18 @@ export const useInstancesStore = defineStore('instances', () => {
     const previousId = activeInstanceId.value
     activeInstanceId.value = id
 
-    // Reset chat store on instance switch to clear stale data
     if (previousId !== null && previousId !== id) {
+      // Agent sessions must never keep running against the previous
+      // instance's MCP server and tokens — stop them all before switching.
+      if (window.n8nDesk?.agent?.stopAll) {
+        try {
+          await window.n8nDesk.agent.stopAll()
+        } catch {
+          // Best-effort — switching proceeds either way
+        }
+      }
+
+      // Reset chat store on instance switch to clear stale data
       const chatStore = useChatStore()
       chatStore.reset()
     }

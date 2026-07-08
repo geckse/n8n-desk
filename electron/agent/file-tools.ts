@@ -1,10 +1,12 @@
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
 import fs from 'fs/promises'
+import type { Dirent } from 'fs'
 import path from 'path'
 
 import type { FilesystemSandboxPolicy } from './types'
 import { resolveAndValidatePath, isReadDenied, isWriteAllowed } from './sandbox-filter'
+import { SENSITIVE_WRITE_DENY_EXTENSIONS } from './sandbox-policy'
 
 // File parser imports — each parser lazy-loads its heavy dependencies internally
 import { readText, writeText } from './file-parsers/text'
@@ -80,6 +82,53 @@ async function validateWritePath(
   }
 
   return { resolvedPath: pathResult.resolvedPath! }
+}
+
+/**
+ * Validate a path for file-management operations (move/copy/delete).
+ *
+ * Unlike validateWritePath, the writable-extension allowlist does NOT apply:
+ * that list exists to stop the agent CREATING arbitrary content, while
+ * managing already-existing user files (photos, archives, …) is legitimate.
+ * What still holds: the path must sit inside a READ-WRITE mount, and the
+ * executable deny-list applies to destinations.
+ */
+async function validateManagePath(
+  requestedPath: string,
+  policy: FilesystemSandboxPolicy,
+  options: { denyExecutable?: boolean } = {},
+): Promise<{ resolvedPath: string } | { error: string }> {
+  const pathResult = await resolveAndValidatePath(requestedPath, policy)
+  if (!pathResult.allowed) {
+    return { error: pathResult.error! }
+  }
+  if (pathResult.mount!.mode !== 'rw') {
+    return { error: `Denied: the folder containing "${requestedPath}" is attached as read-only.` }
+  }
+  if (options.denyExecutable) {
+    const ext = path.extname(pathResult.resolvedPath!).toLowerCase()
+    if (SENSITIVE_WRITE_DENY_EXTENSIONS.has(ext)) {
+      return { error: `Denied: ${ext} files cannot be created for security.` }
+    }
+  }
+  return { resolvedPath: pathResult.resolvedPath! }
+}
+
+/**
+ * Lazy Electron access for shell/clipboard integration. Returns null outside
+ * an Electron main process (e.g. unit tests) so callers degrade gracefully.
+ */
+async function getElectron(): Promise<{
+  shell?: { trashItem: (p: string) => Promise<void>; openPath: (p: string) => Promise<string> }
+  clipboard?: { readText: () => string; writeText: (t: string) => void }
+} | null> {
+  try {
+    const electron = await import('electron')
+    if (typeof electron?.shell?.openPath !== 'function') return null
+    return electron
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,26 +266,14 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
           return JSON.stringify({ success: false, error: validation.error })
         }
 
-        const off = offset ?? 0
-        const lim = limit ?? 100
-
-        // Read enough rows to cover offset + limit, then slice for pagination
+        // The parser streams the file and keeps only the requested window in
+        // memory (audit #55) — pagination happens inside readCsv.
         const result = await readCsv(validation.resolvedPath, {
           delimiter,
-          maxRows: off + lim,
+          offset: offset ?? 0,
+          maxRows: limit ?? 100,
         })
-
-        if (!result.success) {
-          return JSON.stringify(result)
-        }
-
-        // Apply offset pagination on top of parser results
-        const paginatedRows = result.rows.slice(off, off + lim)
-        return JSON.stringify({
-          ...result,
-          rows: paginatedRows,
-          truncated: result.totalRows > off + lim,
-        })
+        return JSON.stringify(result)
       }),
       {
         name: 'read_csv',
@@ -457,19 +494,25 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
 
     tool(
       safeHandler(async (args) => {
-        const { path: filePath } = args as { path: string }
+        const { path: filePath, offset, limit } = args as {
+          path: string; offset?: number; limit?: number
+        }
         const validation = await validateReadPath(filePath, policy)
         if ('error' in validation) {
           return JSON.stringify({ success: false, error: validation.error })
         }
-        const result = await readText(validation.resolvedPath)
+        const result = await readText(validation.resolvedPath, { offset, limit })
         return JSON.stringify(result)
       }),
       {
         name: 'read_text',
-        description: 'Read a text file. Returns the full content, file size in bytes, and line count.',
+        description:
+          'Read a text file. Returns up to 2000 lines by default plus the total line count — ' +
+          'use offset and limit to page through longer files. Binary files are rejected with a hint.',
         schema: z.object({
           path: z.string().describe('Path to the text file'),
+          offset: z.number().optional().describe('Number of lines to skip (default: 0)'),
+          limit: z.number().optional().describe('Maximum number of lines to return (default: 2000)'),
         }),
       },
     ),
@@ -494,6 +537,68 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
       },
     ),
 
+    // --- Partial Edit (edit_text — 'edit_file' collides with deepagents' built-in) -----------------------------------------------------------
+
+    tool(
+      safeHandler(async (args) => {
+        const { path: filePath, old_string: oldString, new_string: newString, replace_all: replaceAll } = args as {
+          path: string; old_string: string; new_string: string; replace_all?: boolean
+        }
+
+        if (oldString === newString) {
+          return JSON.stringify({ success: false, error: 'old_string and new_string are identical.' })
+        }
+
+        // Editing both reads and writes the file — enforce both checks.
+        const readValidation = await validateReadPath(filePath, policy)
+        if ('error' in readValidation) {
+          return JSON.stringify({ success: false, error: readValidation.error })
+        }
+        const validation = await validateWritePath(filePath, policy)
+        if ('error' in validation) {
+          return JSON.stringify({ success: false, error: validation.error })
+        }
+
+        let content: string
+        try {
+          content = await fs.readFile(validation.resolvedPath, 'utf-8')
+        } catch {
+          return JSON.stringify({ success: false, error: `File not found: ${filePath}` })
+        }
+
+        const occurrences = content.split(oldString).length - 1
+        if (occurrences === 0) {
+          return JSON.stringify({ success: false, error: 'old_string not found in the file. Read the file and match the existing text exactly (including whitespace).' })
+        }
+        if (occurrences > 1 && !replaceAll) {
+          return JSON.stringify({
+            success: false,
+            error: `old_string appears ${occurrences} times. Provide a longer unique string, or set replace_all: true to replace every occurrence.`,
+          })
+        }
+
+        const updated = replaceAll
+          ? content.split(oldString).join(newString)
+          : content.replace(oldString, newString)
+        await fs.writeFile(validation.resolvedPath, updated, 'utf-8')
+
+        return JSON.stringify({ success: true, replacements: replaceAll ? occurrences : 1 })
+      }),
+      {
+        name: 'edit_text',
+        description:
+          'Make a surgical edit to a text-based file by replacing an exact string match. ' +
+          'The old_string must match the file content exactly (including whitespace) and must be unique ' +
+          'unless replace_all is set. Prefer this over write_text when changing part of an existing file.',
+        schema: z.object({
+          path: z.string().describe('Path to the file to edit'),
+          old_string: z.string().describe('Exact text to replace (must be unique in the file unless replace_all)'),
+          new_string: z.string().describe('Replacement text'),
+          replace_all: z.boolean().optional().describe('Replace every occurrence instead of requiring uniqueness (default: false)'),
+        }),
+      },
+    ),
+
     // --- List Files ------------------------------------------------------------
 
     tool(
@@ -505,6 +610,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
         if ('error' in validation) {
           return JSON.stringify({ success: false, error: validation.error })
         }
+        const rootPath = validation.resolvedPath
 
         const results: Array<{ name: string; type: 'file' | 'directory'; size?: number }> = []
         const maxEntries = 500
@@ -513,7 +619,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
           if (results.length >= maxEntries) return
           if (depth > 5) return // safety limit on recursion depth
 
-          let entries: Awaited<ReturnType<typeof fs.readdir>>
+          let entries: Dirent[]
           try {
             entries = await fs.readdir(dir, { withFileTypes: true })
           } catch {
@@ -526,7 +632,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
             if (entry.name.startsWith('.')) continue
 
             const fullPath = path.join(dir, entry.name)
-            const relativePath = path.relative(validation.resolvedPath!, fullPath)
+            const relativePath = path.relative(rootPath, fullPath)
 
             if (pattern) {
               const pat = pattern.toLowerCase()
@@ -555,7 +661,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
           }
         }
 
-        await listDir(validation.resolvedPath!, 0)
+        await listDir(rootPath, 0)
         const truncated = results.length >= maxEntries
         return JSON.stringify({
           success: true,
@@ -589,6 +695,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
         if ('error' in validation) {
           return JSON.stringify({ success: false, error: validation.error })
         }
+        const rootPath = validation.resolvedPath
 
         const matches: Array<{ file: string; line: number; content: string }> = []
         const maxMatches = 100
@@ -598,7 +705,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
           if (matches.length >= maxMatches) return
           if (depth > 5) return
 
-          let entries: Awaited<ReturnType<typeof fs.readdir>>
+          let entries: Dirent[]
           try {
             entries = await fs.readdir(dir, { withFileTypes: true })
           } catch {
@@ -643,7 +750,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
                 if (matches.length >= maxMatches) break
                 if (lines[i].toLowerCase().includes(queryLower)) {
                   matches.push({
-                    file: path.relative(validation.resolvedPath!, fullPath),
+                    file: path.relative(rootPath, fullPath),
                     line: i + 1,
                     content: lines[i].trim().slice(0, 200),
                   })
@@ -653,7 +760,7 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
           }
         }
 
-        await searchDir(validation.resolvedPath!, 0)
+        await searchDir(rootPath, 0)
         const truncated = matches.length >= maxMatches
         return JSON.stringify({
           success: true,
@@ -672,6 +779,192 @@ export function createFileTools(policy: FilesystemSandboxPolicy): LangChainTool[
           path: z.string().describe('Path to the directory to search in'),
           query: z.string().describe('Text to search for (case-insensitive)'),
           extensions: z.array(z.string()).optional().describe('File extensions to include (e.g., ["csv", "json", "txt"]). If omitted, searches all text files.'),
+        }),
+      },
+    ),
+
+    // --- File management (audit #32) -------------------------------------------
+    // Move/copy/delete manage EXISTING user files, so the writable-extension
+    // allowlist does not apply — but both endpoints must be in rw mounts,
+    // executables cannot be created, and read-denied sources (.env, keys)
+    // cannot be moved or copied (renaming .env → notes.txt would expose it).
+
+    tool(
+      safeHandler(async (args) => {
+        const { source, destination, overwrite } = args as {
+          source: string; destination: string; overwrite?: boolean
+        }
+        const src = await validateManagePath(source, policy)
+        if ('error' in src) return JSON.stringify({ success: false, error: src.error })
+        const srcDeny = isReadDenied(src.resolvedPath, policy.n8nDeskDir)
+        if (srcDeny.denied) return JSON.stringify({ success: false, error: srcDeny.error })
+        const dest = await validateManagePath(destination, policy, { denyExecutable: true })
+        if ('error' in dest) return JSON.stringify({ success: false, error: dest.error })
+
+        if (!overwrite) {
+          try {
+            await fs.access(dest.resolvedPath)
+            return JSON.stringify({ success: false, error: `Destination already exists: ${destination}. Set overwrite: true to replace it.` })
+          } catch { /* destination free */ }
+        }
+
+        await fs.mkdir(path.dirname(dest.resolvedPath), { recursive: true })
+        await fs.rename(src.resolvedPath, dest.resolvedPath)
+        return JSON.stringify({ success: true, moved: source, to: destination })
+      }),
+      {
+        name: 'move_file',
+        description:
+          'Move or rename a file or directory within the attached folders. ' +
+          'Fails if the destination exists unless overwrite is set.',
+        schema: z.object({
+          source: z.string().describe('Current path of the file or directory'),
+          destination: z.string().describe('New path'),
+          overwrite: z.boolean().optional().describe('Replace the destination if it exists (default: false)'),
+        }),
+      },
+    ),
+
+    tool(
+      safeHandler(async (args) => {
+        const { source, destination, overwrite } = args as {
+          source: string; destination: string; overwrite?: boolean
+        }
+        const src = await validateReadPath(source, policy)
+        if ('error' in src) return JSON.stringify({ success: false, error: src.error })
+        const dest = await validateManagePath(destination, policy, { denyExecutable: true })
+        if ('error' in dest) return JSON.stringify({ success: false, error: dest.error })
+
+        if (!overwrite) {
+          try {
+            await fs.access(dest.resolvedPath)
+            return JSON.stringify({ success: false, error: `Destination already exists: ${destination}. Set overwrite: true to replace it.` })
+          } catch { /* destination free */ }
+        }
+
+        await fs.mkdir(path.dirname(dest.resolvedPath), { recursive: true })
+        await fs.cp(src.resolvedPath, dest.resolvedPath, { recursive: true, force: overwrite ?? false })
+        return JSON.stringify({ success: true, copied: source, to: destination })
+      }),
+      {
+        name: 'copy_file',
+        description:
+          'Copy a file or directory within the attached folders. ' +
+          'Fails if the destination exists unless overwrite is set.',
+        schema: z.object({
+          source: z.string().describe('Path of the file or directory to copy'),
+          destination: z.string().describe('Path of the copy'),
+          overwrite: z.boolean().optional().describe('Replace the destination if it exists (default: false)'),
+        }),
+      },
+    ),
+
+    tool(
+      safeHandler(async (args) => {
+        const { path: targetPath } = args as { path: string }
+        const target = await validateManagePath(targetPath, policy)
+        if ('error' in target) return JSON.stringify({ success: false, error: target.error })
+
+        try {
+          await fs.access(target.resolvedPath)
+        } catch {
+          return JSON.stringify({ success: false, error: `File not found: ${targetPath}` })
+        }
+
+        // Prefer the OS trash so the user can undo; hard-delete only when the
+        // Electron shell is unavailable (e.g. tests).
+        const electron = await getElectron()
+        if (electron?.shell && typeof electron.shell.trashItem === 'function') {
+          await electron.shell.trashItem(target.resolvedPath)
+          return JSON.stringify({ success: true, deleted: targetPath, method: 'trash' })
+        }
+        await fs.rm(target.resolvedPath, { recursive: true })
+        return JSON.stringify({ success: true, deleted: targetPath, method: 'permanent' })
+      }),
+      {
+        name: 'delete_file',
+        description:
+          'Delete a file or directory within the attached folders. ' +
+          'Moves it to the OS trash so the user can restore it.',
+        schema: z.object({
+          path: z.string().describe('Path of the file or directory to delete'),
+        }),
+      },
+    ),
+
+    tool(
+      safeHandler(async (args) => {
+        const { path: targetPath } = args as { path: string }
+        const validation = await validateReadPath(targetPath, policy)
+        if ('error' in validation) {
+          return JSON.stringify({ success: false, error: validation.error })
+        }
+        const electron = await getElectron()
+        if (!electron?.shell) {
+          return JSON.stringify({ success: false, error: 'Opening files requires the desktop app.' })
+        }
+        const openError = await electron.shell.openPath(validation.resolvedPath)
+        if (openError) {
+          return JSON.stringify({ success: false, error: `Could not open file: ${openError}` })
+        }
+        return JSON.stringify({ success: true, opened: targetPath })
+      }),
+      {
+        name: 'open_path',
+        description:
+          'Open a file or folder from the attached folders in its default application ' +
+          '(e.g. a PDF in Preview, a folder in Finder). Use after creating output the user asked to see.',
+        schema: z.object({
+          path: z.string().describe('Path of the file or folder to open'),
+        }),
+      },
+    ),
+
+    // --- Clipboard (audit #32) --------------------------------------------------
+
+    tool(
+      safeHandler(async () => {
+        const electron = await getElectron()
+        if (!electron?.clipboard) {
+          return JSON.stringify({ success: false, error: 'Clipboard access requires the desktop app.' })
+        }
+        const text = electron.clipboard.readText()
+        const MAX_CLIPBOARD_CHARS = 200_000
+        if (text.length > MAX_CLIPBOARD_CHARS) {
+          return JSON.stringify({
+            success: true,
+            text: text.slice(0, MAX_CLIPBOARD_CHARS),
+            truncated: true,
+            totalChars: text.length,
+          })
+        }
+        return JSON.stringify({ success: true, text, truncated: false })
+      }),
+      {
+        name: 'clipboard_read',
+        description: 'Read the current text content of the system clipboard.',
+        schema: z.object({}),
+      },
+    ),
+
+    tool(
+      safeHandler(async (args) => {
+        const { text } = args as { text: string }
+        if (text.length > 1_000_000) {
+          return JSON.stringify({ success: false, error: 'Clipboard content too large (max 1,000,000 characters).' })
+        }
+        const electron = await getElectron()
+        if (!electron?.clipboard) {
+          return JSON.stringify({ success: false, error: 'Clipboard access requires the desktop app.' })
+        }
+        electron.clipboard.writeText(text)
+        return JSON.stringify({ success: true, chars: text.length })
+      }),
+      {
+        name: 'clipboard_write',
+        description: 'Copy text to the system clipboard so the user can paste it elsewhere.',
+        schema: z.object({
+          text: z.string().describe('Text to place on the clipboard'),
         }),
       },
     ),

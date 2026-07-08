@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { IonPopover, IonList, IonItem, IonLabel, isPlatform, actionSheetController, alertController } from '@ionic/vue'
-import { Pencil, Trash2 } from 'lucide-vue-next'
+import { Pencil, RotateCcw, Trash2 } from 'lucide-vue-next'
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -9,10 +9,13 @@ const props = defineProps<{
   sessionTitle: string
   isOpen: boolean
   event: Event | null
+  /** Show the "Re-run" action (agent sessions only — audit #50) */
+  showRerun?: boolean
 }>()
 
 const emit = defineEmits<{
   rename: [id: string]
+  rerun: [id: string]
   delete: [id: string]
   dismiss: []
 }>()
@@ -37,6 +40,12 @@ async function showActionSheet() {
   const sheet = await actionSheetController.create({
     header: props.sessionTitle,
     buttons: [
+      ...(props.showRerun ? [{
+        text: t('sidebar.rerun'),
+        handler: () => {
+          emit('rerun', props.sessionId)
+        },
+      }] : []),
       {
         text: t('sidebar.rename'),
         handler: () => {
@@ -96,6 +105,11 @@ function handleRename() {
   emit('rename', props.sessionId)
 }
 
+function handleRerun() {
+  popoverOpen.value = false
+  emit('rerun', props.sessionId)
+}
+
 function handleDelete() {
   popoverOpen.value = false
   confirmDelete()
@@ -115,6 +129,10 @@ function onPopoverDismiss() {
     @did-dismiss="onPopoverDismiss"
   >
     <ion-list lines="none" class="context-menu-list">
+      <ion-item v-if="showRerun" button @click="handleRerun">
+        <RotateCcw :size="14" class="context-menu-icon" />
+        <ion-label>{{ t('sidebar.rerun') }}</ion-label>
+      </ion-item>
       <ion-item button @click="handleRename">
         <Pencil :size="14" class="context-menu-icon" />
         <ion-label>{{ t('sidebar.rename') }}</ion-label>

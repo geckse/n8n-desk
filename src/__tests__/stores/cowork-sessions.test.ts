@@ -138,18 +138,18 @@ describe('cowork-sessions store', () => {
       store = useCoworkSessionsStore()
       await store.hydrate('inst_1')
       await store.createSession('Test')
-      store.isAgentRunning = true
+      store.markRunning(store.activeSessionId!)
     })
 
     it('text_chunk accumulates into assistant message', () => {
       store.handleAgentEvent({
         type: 'text_chunk',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { text: 'Hello' },
       })
       store.handleAgentEvent({
         type: 'text_chunk',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { text: ' world' },
       })
 
@@ -161,7 +161,7 @@ describe('cowork-sessions store', () => {
     it('tool_call_start adds to toolCalls and messages', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_1', name: 'execute_workflow', args: { workflowId: '42' } },
       })
 
@@ -177,12 +177,12 @@ describe('cowork-sessions store', () => {
     it('tool_call_result updates tool call status', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_2', name: 'search_workflows', args: {} },
       })
       store.handleAgentEvent({
         type: 'tool_call_result',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_2', name: 'search_workflows', result: { workflows: [] }, success: true },
       })
 
@@ -193,12 +193,12 @@ describe('cowork-sessions store', () => {
     it('tool_call_result marks failed on success=false', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_3', name: 'create_workflow', args: {} },
       })
       store.handleAgentEvent({
         type: 'tool_call_result',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_3', name: 'create_workflow', result: null, success: false, error: 'fail' },
       })
 
@@ -208,12 +208,12 @@ describe('cowork-sessions store', () => {
     it('approval_required sets pendingApproval', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_4', name: 'publish_workflow', args: {} },
       })
       store.handleAgentEvent({
         type: 'approval_required',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_4', toolName: 'publish_workflow', args: {}, description: 'Publish?' },
       })
 
@@ -225,17 +225,17 @@ describe('cowork-sessions store', () => {
     it('approval_resolved clears pending and updates tool call', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_5', name: 'publish_workflow', args: {} },
       })
       store.handleAgentEvent({
         type: 'approval_required',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_5', toolName: 'publish_workflow', args: {}, description: 'Publish?' },
       })
       store.handleAgentEvent({
         type: 'approval_resolved',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_5', decision: 'approve' },
       })
 
@@ -243,23 +243,76 @@ describe('cowork-sessions store', () => {
       expect(store.toolCalls[0].status).toBe('running')
     })
 
-    it('error event adds system message and stops agent', () => {
+    it('a rejected tool call stays failed even when a success:true result follows', () => {
+      // Deep Agents surfaces the rejection ToolMessage as a SUCCESSFUL tool
+      // result ("The user rejected…" has no error status) — the card must not
+      // flip from failed back to completed.
       store.handleAgentEvent({
-        type: 'error',
-        sessionId: 'test',
-        data: { message: 'Something broke', code: 'ERR_500' },
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_rej', name: 'execute_workflow', args: { workflowId: '42' } },
+      })
+      store.handleAgentEvent({
+        type: 'approval_required',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_rej', toolName: 'execute_workflow', args: {}, description: 'Run?' },
+      })
+      store.handleAgentEvent({
+        type: 'approval_resolved',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_rej', decision: 'reject' },
+      })
+      store.handleAgentEvent({
+        type: 'tool_call_result',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_rej', name: 'execute_workflow', result: 'The user rejected execute_workflow.', success: true },
+      })
+
+      expect(store.toolCalls[0].status).toBe('failed')
+    })
+
+    it('done(cancelled) after a reject clears running state and pendingApproval', () => {
+      store.handleAgentEvent({
+        type: 'approval_required',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_c1', toolName: 'execute_workflow', args: {}, description: 'Run?' },
+      })
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'cancelled' },
       })
 
       expect(store.isAgentRunning).toBe(false)
+      expect(store.pendingApproval).toBeNull()
+    })
+
+    it('error event adds system message but keeps the agent running until done', () => {
+      // Non-terminal errors (e.g. MCP discovery failure) must not hide the
+      // spinner/stop button — only the terminal `done` clears running state.
+      store.handleAgentEvent({
+        type: 'error',
+        sessionId: store.activeSessionId!,
+        data: { message: 'Something broke', code: 'ERR_500' },
+      })
+
+      expect(store.isAgentRunning).toBe(true)
       const sysMsg = store.messages.find((m) => m.role === 'system')
       expect(sysMsg).toBeTruthy()
       expect(sysMsg!.content).toBe('Something broke')
+
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'error' },
+      })
+      expect(store.isAgentRunning).toBe(false)
     })
 
     it('done event stops agent running', () => {
       store.handleAgentEvent({
         type: 'done',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { reason: 'completed' },
       })
 
@@ -272,7 +325,7 @@ describe('cowork-sessions store', () => {
       const store = useCoworkSessionsStore()
       await store.hydrate('inst_1')
       await store.createSession('Test')
-      store.isAgentRunning = true
+      store.markRunning(store.activeSessionId!)
 
       store.reset()
 

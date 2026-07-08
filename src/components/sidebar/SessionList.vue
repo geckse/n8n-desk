@@ -12,11 +12,14 @@ const props = defineProps<{
   sessions: SessionMeta[]
   activeSessionId?: string | null
   searchQuery?: string
+  /** Offer "Re-run" in the context menu (agent sessions only — audit #50) */
+  showRerun?: boolean
 }>()
 
 const emit = defineEmits<{
   select: [id: string]
   rename: [id: string, newTitle: string]
+  rerun: [id: string]
   delete: [id: string]
 }>()
 
@@ -127,6 +130,11 @@ function onContextMenuRename(sessionId: string) {
   startRename(sessionId)
 }
 
+function onContextMenuRerun(sessionId: string) {
+  contextMenuOpen.value = false
+  emit('rerun', sessionId)
+}
+
 function onContextMenuDelete(sessionId: string) {
   contextMenuOpen.value = false
   emit('delete', sessionId)
@@ -200,7 +208,9 @@ function onItemKeydown(session: SessionMeta, event: KeyboardEvent) {
       :session-title="contextMenuSessionTitle"
       :is-open="contextMenuOpen"
       :event="contextMenuEvent"
+      :show-rerun="props.showRerun"
       @rename="onContextMenuRename"
+      @rerun="onContextMenuRerun"
       @delete="onContextMenuDelete"
       @dismiss="onContextMenuDismiss"
     />

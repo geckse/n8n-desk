@@ -152,12 +152,24 @@ export function isReadDenied(
 ): ReadDenyResult {
   const ext = path.extname(filePath).toLowerCase()
   const basename = path.basename(filePath)
+  const basenameLower = basename.toLowerCase()
 
   // Layer 1: Global extension deny-list
   if (SENSITIVE_READ_DENY_EXTENSIONS.has(ext)) {
     return {
       denied: true,
       error: `Access denied: ${ext} files are blocked for security.`,
+    }
+  }
+
+  // Layer 1b: Dotfile forms of the same list. path.extname('.env') === '' so a
+  // file literally named `.env` (or `.env.local`) slips the extension check.
+  for (const deniedExt of SENSITIVE_READ_DENY_EXTENSIONS) {
+    if (basenameLower === deniedExt || basenameLower.startsWith(`${deniedExt}.`)) {
+      return {
+        denied: true,
+        error: `Access denied: "${basename}" files are blocked for security.`,
+      }
     }
   }
 

@@ -1,319 +1,171 @@
-import vm from 'node:vm'
+import path from 'node:path'
+import { Worker } from 'node:worker_threads'
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
+import {
+  DEFAULT_TIMEOUT_MS,
+  MAX_TIMEOUT_MS,
+  type SandboxResult,
+} from './js-sandbox-core'
 
-// --- Types ---
-
-/** Result from executing code in the JS sandbox. */
-export interface SandboxResult {
-  /** The completion value of the executed code. */
-  result: unknown
-  /** Captured console output lines. */
-  stdout: string[]
-  /** Error details if execution failed. */
-  error?: {
-    message: string
-    type: 'runtime' | 'timeout' | 'security'
-  }
-}
+export type { SandboxResult } from './js-sandbox-core'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type LangChainTool = any
 
-// --- Constants ---
-
-/** Default execution timeout in milliseconds (10 seconds). */
-const DEFAULT_TIMEOUT_MS = 10_000
-
-/** Maximum allowed timeout in milliseconds (30 seconds). */
-const MAX_TIMEOUT_MS = 30_000
+// --- Worker resolution ---
 
 /**
- * JavaScript code that freezes all built-in prototypes inside the sandbox context.
- *
- * Prevents prototype pollution from user code. In strict mode, modification
- * attempts throw TypeError; in non-strict they fail silently.
- *
- * Captures `Object.freeze` into a local before freezing to ensure it remains
- * callable even after `Object` is frozen.
+ * Extra wall-clock allowance on top of the vm timeout: worker spawn + module
+ * load overhead. The vm timeout inside the worker bounds synchronous code;
+ * this host-side deadline bounds EVERYTHING (async microtask bombs included).
  */
-const FREEZE_PROTOTYPES_CODE = `
-'use strict';
-const __freeze__ = Object.freeze;
-__freeze__(Object.prototype);
-__freeze__(Array.prototype);
-__freeze__(Function.prototype);
-__freeze__(String.prototype);
-__freeze__(Number.prototype);
-__freeze__(Boolean.prototype);
-__freeze__(Symbol.prototype);
-__freeze__(RegExp.prototype);
-__freeze__(Date.prototype);
-__freeze__(Map.prototype);
-__freeze__(Set.prototype);
-__freeze__(WeakMap.prototype);
-__freeze__(WeakSet.prototype);
-__freeze__(Promise.prototype);
-__freeze__(Error.prototype);
-__freeze__(TypeError.prototype);
-__freeze__(RangeError.prototype);
-__freeze__(ReferenceError.prototype);
-__freeze__(SyntaxError.prototype);
-__freeze__(URIError.prototype);
-__freeze__(EvalError.prototype);
-__freeze__(ArrayBuffer.prototype);
-__freeze__(DataView.prototype);
-__freeze__(Float32Array.prototype);
-__freeze__(Float64Array.prototype);
-__freeze__(Int8Array.prototype);
-__freeze__(Int16Array.prototype);
-__freeze__(Int32Array.prototype);
-__freeze__(Uint8Array.prototype);
-__freeze__(Uint16Array.prototype);
-__freeze__(Uint32Array.prototype);
-__freeze__(Uint8ClampedArray.prototype);
-__freeze__(JSON);
-__freeze__(Math);
-__freeze__(Reflect);
-`
+const WORKER_GRACE_MS = 1_500
 
-// --- Helpers ---
+/** Worker heap cap — a sandbox allocation bomb kills the worker, not the app. */
+const WORKER_MAX_OLD_SPACE_MB = 256
 
-/** Format a single console argument for output. */
-function formatConsoleArg(arg: unknown): string {
-  if (typeof arg === 'string') return arg
-  try {
-    return JSON.stringify(arg)
-  } catch {
-    return String(arg)
-  }
+/**
+ * Resolve the compiled worker entry.
+ *
+ * - Production/dev-electron: esbuild emits `js-sandbox-worker.js` next to the
+ *   main bundle (see scripts/build-electron.mjs) — resolve via __dirname.
+ * - Tests: vitest transforms TS in-process and cannot spawn TS workers, so the
+ *   test setup pre-bundles the worker and points N8N_DESK_SANDBOX_WORKER at it.
+ */
+function resolveWorkerPath(): string {
+  const override = process.env.N8N_DESK_SANDBOX_WORKER
+  if (override) return override
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  const baseDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd()
+  return path.join(baseDir, 'js-sandbox-worker.js')
 }
 
-/**
- * Create a console-like object that captures output to a string array.
- * Supports log, warn, error, info, and debug methods.
- */
-function createCapturedConsole(stdout: string[]): Record<string, (...args: unknown[]) => void> {
-  const format = (...args: unknown[]): string => args.map(formatConsoleArg).join(' ')
-  return {
-    log: (...args: unknown[]) => stdout.push(format(...args)),
-    warn: (...args: unknown[]) => stdout.push(`[warn] ${format(...args)}`),
-    error: (...args: unknown[]) => stdout.push(`[error] ${format(...args)}`),
-    info: (...args: unknown[]) => stdout.push(`[info] ${format(...args)}`),
-    debug: (...args: unknown[]) => stdout.push(`[debug] ${format(...args)}`),
-  }
-}
+// --- Public API ---
 
 /**
- * Collect stdout entries from a DONT_CONTEXTIFY context's internal array.
- * Returns silently if retrieval fails.
- */
-function collectInternalStdout(context: vm.Context, stdout: string[]): void {
-  try {
-    const entries = vm.runInContext('globalThis.__stdout__', context) as unknown
-    if (Array.isArray(entries)) {
-      for (const entry of entries) {
-        stdout.push(String(entry))
-      }
-    }
-  } catch {
-    // Retrieval failed — ignore (stdout may be partial)
-  }
-}
-
-/**
- * Check if an unknown value is error-like (has name and message string properties).
+ * Execute JavaScript code in a sandboxed worker thread with zero I/O access.
  *
- * Errors thrown inside a DONT_CONTEXTIFY vm context are NOT `instanceof Error`
- * from the host's perspective — they originate from a separate V8 context with
- * its own Error prototype chain. This helper detects error-like objects by
- * duck-typing so that `classifyError` can inspect their properties.
- */
-function isErrorLike(err: unknown): err is { name: string; message: string; code?: string } {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    typeof (err as Record<string, unknown>).name === 'string' &&
-    typeof (err as Record<string, unknown>).message === 'string'
-  )
-}
-
-/**
- * Classify a vm execution error into a typed error result.
- *
- * Handles both host-native Error instances and cross-context error objects
- * from DONT_CONTEXTIFY vm contexts (where `instanceof Error` is false).
- */
-function classifyError(
-  err: unknown,
-  timeoutMs: number,
-): NonNullable<SandboxResult['error']> {
-  if (!isErrorLike(err)) {
-    return { message: String(err), type: 'runtime' }
-  }
-
-  // Timeout: vm throws with code ERR_SCRIPT_EXECUTION_TIMEOUT
-  if (
-    err.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' ||
-    err.message.includes('Script execution timed out')
-  ) {
-    return {
-      message: `Execution timed out (${timeoutMs / 1000}s limit)`,
-      type: 'timeout',
-    }
-  }
-
-  // eval()/Function() blocked by codeGeneration: { strings: false }
-  if (
-    err.name === 'EvalError' ||
-    err.message.includes('Code generation from strings disallowed')
-  ) {
-    return {
-      message: 'eval() and Function() are not allowed in the sandbox',
-      type: 'security',
-    }
-  }
-
-  // All other errors (SyntaxError, TypeError, ReferenceError, etc.)
-  return { message: err.message, type: 'runtime' }
-}
-
-// --- Core ---
-
-/**
- * Execute JavaScript code in a sandboxed vm context with zero I/O access.
- *
- * **Safe globals available in the sandbox:**
- * - Built-in V8: JSON, Math, Date, Array, Object, String, Number, Boolean,
- *   RegExp, Map, Set, Promise, Symbol, WeakMap, WeakSet, parseInt, parseFloat,
- *   isNaN, isFinite, NaN, Infinity, undefined, encodeURI, decodeURI,
- *   encodeURIComponent, decodeURIComponent, ArrayBuffer, DataView, typed arrays
- * - Injected: console (captured), inputData (deep-cloned), structuredClone
- *
- * **Blocked:**
- * - require, import, process, fs, child_process, Buffer
- * - setTimeout, setInterval, setImmediate, fetch, XMLHttpRequest
- * - eval() and Function() constructor (via codeGeneration restriction)
- * - Prototype pollution (all built-in prototypes frozen before user code)
- *
- * Uses `vm.constants.DONT_CONTEXTIFY` when available (Node 20.18.0+ / Electron 33+)
- * for a vanilla V8 context with reliable prototype freezing. Falls back to regular
- * `vm.createContext()` on older Node.js versions.
+ * The vm-level timeout (inside the worker) bounds synchronous code; the
+ * worker itself is hard-terminated at a wall-clock deadline so async
+ * microtask bombs cannot starve the Electron main process (they starve the
+ * disposable worker instead). A memory cap kills allocation bombs.
  *
  * @param code - JavaScript code to execute. The completion value of the last
  *   expression is returned as the result.
  * @param inputData - Optional data accessible as `inputData` in the sandbox.
- *   Deep-cloned via structuredClone to prevent reference leaks.
+ *   Must be structured-cloneable (it crosses the worker boundary).
  * @param timeoutMs - Execution timeout in milliseconds (default: 10000, max: 30000).
- * @returns SandboxResult with result, captured stdout, and optional error.
+ * @param signal - Optional abort signal — terminates the worker immediately
+ *   (used by agent stop()).
  */
 export async function executeInSandbox(
   code: string,
   inputData?: unknown,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<SandboxResult> {
-  const stdout: string[] = []
   const effectiveTimeout = Math.min(Math.max(timeoutMs, 1), MAX_TIMEOUT_MS)
-  let context: vm.Context | undefined
-  let useInternalStdout = false
 
-  try {
-    // Deep-clone inputData to prevent reference leaks between host and sandbox
-    const clonedInput = inputData !== undefined ? structuredClone(inputData) : undefined
-
-    // Detect vm.constants.DONT_CONTEXTIFY (Node 20.18.0+ / Electron 33+)
-    const vmConstants = (vm as Record<string, unknown>).constants as
-      | Record<string, symbol>
-      | undefined
-    const DONT_CONTEXTIFY = vmConstants?.DONT_CONTEXTIFY
-
-    if (DONT_CONTEXTIFY) {
-      // Vanilla V8 context — prototypes freeze reliably, no proxy on global.
-      // The context has default V8 built-ins but no Node.js APIs.
-      context = vm.createContext(
-        DONT_CONTEXTIFY as unknown as object,
-        { codeGeneration: { strings: false, wasm: false } },
-      )
-
-      // Create console capture entirely inside the context.
-      // Host functions can't be passed directly to DONT_CONTEXTIFY contexts,
-      // so we build the capture mechanism in-context and retrieve stdout after.
-      vm.runInContext(`
-        const __stdout__ = [];
-        const __fmt__ = (a) => {
-          if (typeof a === 'string') return a;
-          try { return JSON.stringify(a); } catch(e) { return String(a); }
-        };
-        const __join__ = (...args) => args.map(__fmt__).join(' ');
-        globalThis.console = {
-          log: (...a) => __stdout__.push(__join__(...a)),
-          warn: (...a) => __stdout__.push('[warn] ' + __join__(...a)),
-          error: (...a) => __stdout__.push('[error] ' + __join__(...a)),
-          info: (...a) => __stdout__.push('[info] ' + __join__(...a)),
-          debug: (...a) => __stdout__.push('[debug] ' + __join__(...a)),
-        };
-        globalThis.__stdout__ = __stdout__;
-      `, context)
-      useInternalStdout = true
-
-      // Inject inputData via JSON serialization (safe for agent tool data)
-      if (clonedInput !== undefined) {
-        try {
-          const serialized = JSON.stringify(clonedInput)
-          vm.runInContext(`globalThis.inputData = ${serialized};`, context)
-        } catch {
-          // If inputData can't be JSON-serialized, inject undefined
-          vm.runInContext('globalThis.inputData = undefined;', context)
-        }
-      }
-    } else {
-      // Regular contextified approach — works on all Node.js versions.
-      // The context object becomes the global, with its own V8 built-ins
-      // (Object, Array, etc.) that are separate from the host's.
-      const sandbox: Record<string, unknown> = {
-        console: createCapturedConsole(stdout),
-        structuredClone,
-      }
-      if (clonedInput !== undefined) {
-        sandbox.inputData = clonedInput
-      }
-
-      context = vm.createContext(sandbox, {
-        codeGeneration: { strings: false, wasm: false },
-      })
-    }
-
-    // Freeze all built-in prototypes before user code runs.
-    // This prevents prototype pollution attacks.
-    vm.runInContext(FREEZE_PROTOTYPES_CODE, context)
-
-    // Run user code in strict mode.
-    // Strict mode ensures modification of frozen prototypes throws TypeError
-    // (rather than failing silently), and prevents undeclared variable assignment.
-    const strictCode = `'use strict';\n${code}`
-    const result = vm.runInContext(strictCode, context, {
-      timeout: effectiveTimeout,
-      filename: 'sandbox.js',
-    })
-
-    // Retrieve stdout from DONT_CONTEXTIFY context's internal array
-    if (useInternalStdout) {
-      collectInternalStdout(context, stdout)
-    }
-
-    return { result, stdout }
-  } catch (err) {
-    // Attempt to collect any stdout captured before the error
-    if (useInternalStdout && context) {
-      collectInternalStdout(context, stdout)
-    }
-
+  if (signal?.aborted) {
     return {
       result: undefined,
-      stdout,
-      error: classifyError(err, effectiveTimeout),
+      stdout: [],
+      error: { message: 'Execution cancelled', type: 'cancelled' },
     }
   }
+
+  let worker: Worker
+  try {
+    worker = new Worker(resolveWorkerPath(), {
+      workerData: { code, inputData, timeoutMs: effectiveTimeout },
+      resourceLimits: {
+        maxOldGenerationSizeMb: WORKER_MAX_OLD_SPACE_MB,
+        maxYoungGenerationSizeMb: 64,
+      },
+    })
+  } catch (err) {
+    // Non-cloneable inputData or missing worker bundle
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      result: undefined,
+      stdout: [],
+      error: { message: `Failed to start sandbox worker: ${message}`, type: 'runtime' },
+    }
+  }
+
+  return new Promise<SandboxResult>((resolve) => {
+    let settled = false
+
+    function settle(result: SandboxResult, terminate: boolean): void {
+      if (settled) return
+      settled = true
+      clearTimeout(killTimer)
+      signal?.removeEventListener('abort', onAbort)
+      if (terminate) {
+        void worker.terminate()
+      }
+      resolve(result)
+    }
+
+    function onAbort(): void {
+      settle(
+        {
+          result: undefined,
+          stdout: [],
+          error: { message: 'Execution cancelled', type: 'cancelled' },
+        },
+        true,
+      )
+    }
+
+    // Hard wall-clock kill — covers async work the vm timeout cannot see.
+    const killTimer = setTimeout(() => {
+      settle(
+        {
+          result: undefined,
+          stdout: [],
+          error: {
+            message: `Execution timed out (${effectiveTimeout / 1000}s limit)`,
+            type: 'timeout',
+          },
+        },
+        true,
+      )
+    }, effectiveTimeout + WORKER_GRACE_MS)
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    worker.once('message', (result: SandboxResult) => {
+      settle(result, true)
+    })
+
+    worker.once('error', (err: Error) => {
+      settle(
+        {
+          result: undefined,
+          stdout: [],
+          error: { message: err.message, type: 'runtime' },
+        },
+        true,
+      )
+    })
+
+    worker.once('exit', (exitCode: number) => {
+      // Exit without a message: memory-cap kill or crash.
+      settle(
+        {
+          result: undefined,
+          stdout: [],
+          error: {
+            message: `Sandbox worker exited unexpectedly (code ${exitCode}) — possibly exceeded the ${WORKER_MAX_OLD_SPACE_MB}MB memory limit`,
+            type: 'runtime',
+          },
+        },
+        false,
+      )
+    })
+  })
 }
 
 // --- LangChain Tool ---
@@ -321,18 +173,23 @@ export async function executeInSandbox(
 /**
  * LangChain tool wrapper for the JS compute sandbox.
  *
- * Executes agent-generated JavaScript in a zero-I/O vm context.
+ * Executes agent-generated JavaScript in a zero-I/O worker-thread vm context.
  * Does NOT require human-in-the-loop approval (not in DESTRUCTIVE_TOOLS).
+ * Forwards LangChain's per-run config.signal so agent stop() terminates the
+ * worker mid-run.
  *
  * Returns a JSON string with `{ result, stdout, error? }` shape.
  */
 export const jsComputeTool: LangChainTool = tool(
-  async ({ code, inputData, timeoutMs }: {
-    code: string
-    inputData?: unknown
-    timeoutMs?: number
-  }) => {
-    const result = await executeInSandbox(code, inputData, timeoutMs)
+  async (
+    { code, inputData, timeoutMs }: {
+      code: string
+      inputData?: unknown
+      timeoutMs?: number
+    },
+    config?: { signal?: AbortSignal },
+  ) => {
+    const result = await executeInSandbox(code, inputData, timeoutMs, config?.signal)
     return JSON.stringify(result)
   },
   {

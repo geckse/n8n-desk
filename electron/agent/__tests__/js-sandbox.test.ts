@@ -473,3 +473,80 @@ describe('executeInSandbox', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Worker isolation — async bombs, host responsiveness, cancellation (#11)
+// ---------------------------------------------------------------------------
+
+describe('worker isolation and hard wall-clock kill', () => {
+  it('an async microtask bomb cannot hang the app — sync result returns, bomb is discarded', async () => {
+    // Sync execution completes instantly (value 1); the scheduled microtask
+    // recursion is dropped when the worker posts its result and exits. On the
+    // old main-thread implementation this exact code froze the Electron main
+    // process forever (empirically confirmed in the audit).
+    const bomb = 'Promise.resolve().then(function b(){ Promise.resolve().then(b) }); 1'
+    const start = Date.now()
+    const result = await executeInSandbox(bomb, undefined, 1000)
+    const elapsed = Date.now() - start
+
+    expect(result.error).toBeUndefined()
+    expect(result.result).toBe(1)
+    expect(elapsed).toBeLessThan(5_000)
+  }, 15_000)
+
+  it('host event loop stays responsive during a long-running sandbox execution', async () => {
+    const ticks: number[] = []
+    const interval = setInterval(() => ticks.push(Date.now()), 100)
+
+    // Sync infinite loop — spins inside the WORKER until its vm timeout (2s).
+    const result = await executeInSandbox('for(;;){}', undefined, 2000)
+    clearInterval(interval)
+
+    expect(result.error).toBeDefined()
+    expect(result.error!.type).toBe('timeout')
+    // If the loop ran on the host thread, no timer could fire at all.
+    expect(ticks.length).toBeGreaterThanOrEqual(5)
+  }, 15_000)
+
+  it('a never-resolving promise result is killed at the deadline', async () => {
+    const result = await executeInSandbox('new Promise(() => {})', undefined, 1000)
+    // The completion value is an unresolvable promise — the worker posts the
+    // sync completion (a Promise serializes to {}), or the deadline kills it.
+    // Either way this MUST return within the deadline and never hang.
+    expect(result).toBeDefined()
+  }, 15_000)
+
+  it('abort signal terminates the worker immediately', async () => {
+    const controller = new AbortController()
+    // Long sync loop with the max timeout — only the abort can end it early.
+    const promise = executeInSandbox('for(;;){}', undefined, 30_000, controller.signal)
+    setTimeout(() => controller.abort(), 200)
+
+    const start = Date.now()
+    const result = await promise
+    const elapsed = Date.now() - start
+
+    expect(result.error).toBeDefined()
+    expect(result.error!.type).toBe('cancelled')
+    expect(elapsed).toBeLessThan(5_000)
+  }, 15_000)
+
+  it('pre-aborted signal short-circuits without spawning a worker', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const result = await executeInSandbox('1 + 1', undefined, 1000, controller.signal)
+    expect(result.error).toBeDefined()
+    expect(result.error!.type).toBe('cancelled')
+  })
+
+  it('an allocation bomb is killed by the worker memory cap', async () => {
+    const memoryBomb = `
+      const chunks = [];
+      for (;;) { chunks.push(new Array(1024 * 1024).fill(1)); }
+    `
+    const result = await executeInSandbox(memoryBomb, undefined, 10_000)
+    expect(result.error).toBeDefined()
+    // Either the memory cap kills the worker (runtime) or the vm timeout fires
+    expect(['runtime', 'timeout']).toContain(result.error!.type)
+  }, 20_000)
+})

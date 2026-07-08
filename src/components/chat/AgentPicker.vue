@@ -22,7 +22,9 @@ import type {
   ChatHubConversationModel,
   ChatHubProvider,
 } from '@/types/chathub'
+import { useI18n } from 'vue-i18n'
 
+const { t } = useI18n()
 const props = defineProps<{
   isOpen: boolean
   agents: ChatModelDto[]
@@ -176,7 +178,7 @@ function getInitial(name: string | undefined): string {
       <ion-toolbar>
         <ion-searchbar
           v-model="searchQuery"
-          placeholder="Search agents and models..."
+          :placeholder="t('chat.agents.searchPlaceholder')"
           :debounce="150"
           :class="$style.searchbar"
         />
@@ -189,8 +191,8 @@ function getInitial(name: string | undefined): string {
         v-if="groupedAgents.length === 0"
         :class="$style.emptyState"
       >
-        <p v-if="searchQuery">No agents or models match "{{ searchQuery }}"</p>
-        <p v-else>No agents or models available. Check your instance configuration.</p>
+        <p v-if="searchQuery">{{ t('chat.agents.noMatches', { query: searchQuery }) }}</p>
+        <p v-else>{{ t('chat.agents.noneAvailable') }}</p>
       </div>
 
       <!-- Grouped agent list -->
@@ -226,7 +228,7 @@ function getInitial(name: string | undefined): string {
               slot="end"
               :class="$style.unavailableBadge"
             >
-              Unavailable
+              {{ t('chat.agents.unavailable') }}
             </ion-note>
           </ion-item>
         </ion-list>

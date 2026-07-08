@@ -5,7 +5,7 @@ import os from 'os'
 
 import { createFileTools } from '../file-tools'
 import { buildCoworkPolicy } from '../sandbox-policy'
-import type { FilesystemSandboxPolicy, SandboxFolderMount } from '../types'
+import type { FilesystemSandboxPolicy } from '../types'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,29 +38,18 @@ async function makeTestPolicy(projectDir: string): Promise<FilesystemSandboxPoli
   return buildCoworkPolicy([{ path: projectDir }], n8nDeskDir)
 }
 
-/** Build a minimal policy from raw mounts (for targeted tests). */
-function makePolicyFromMounts(
-  mounts: SandboxFolderMount[],
-  n8nDeskDir?: string,
-): FilesystemSandboxPolicy {
-  return {
-    mounts,
-    n8nDeskDir: n8nDeskDir ?? path.join(tmpDir, '.n8n-desk'),
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Tool count and names
 // ---------------------------------------------------------------------------
 
 describe('createFileTools', () => {
-  it('returns exactly 15 tools', async () => {
+  it('returns exactly 22 tools', async () => {
     const projectDir = path.join(tmpDir, 'project')
     await fs.mkdir(projectDir, { recursive: true })
     const policy = await makeTestPolicy(projectDir)
     const tools = createFileTools(policy)
 
-    expect(tools).toHaveLength(15)
+    expect(tools).toHaveLength(22)
   })
 
   it('returns tools with expected names', async () => {
@@ -71,7 +60,14 @@ describe('createFileTools', () => {
 
     const toolNames = tools.map((t: { name: string }) => t.name).sort()
     const expectedNames = [
+      'clipboard_read',
+      'clipboard_write',
+      'copy_file',
+      'delete_file',
+      'edit_text',
       'list_files',
+      'move_file',
+      'open_path',
       'read_csv',
       'read_docx',
       'read_excel',
@@ -272,17 +268,23 @@ describe('tools respect read deny-lists', () => {
     const skillsDir = path.join(n8nDeskDir, 'skills')
     await fs.mkdir(projectDir, { recursive: true })
     await fs.mkdir(skillsDir, { recursive: true })
+    // The n8n-desk root is not mounted at all now, so a copy at the root is
+    // simply outside the sandbox. Also verify the scoped filename deny-list
+    // still blocks the file inside the mounted skills subtree.
     await fs.writeFile(path.join(n8nDeskDir, 'llm.json'), '{"apiKey": "sk-secret"}')
+    await fs.writeFile(path.join(skillsDir, 'llm.json'), '{"apiKey": "sk-secret"}')
 
     const policy = buildCoworkPolicy([{ path: projectDir }], n8nDeskDir)
     const tools = createFileTools(policy)
     const readText = tools.find((t: { name: string }) => t.name === 'read_text')!
 
-    const resultStr = await readText.invoke({ path: path.join(n8nDeskDir, 'llm.json') })
-    const result = JSON.parse(resultStr)
+    const rootResult = JSON.parse(await readText.invoke({ path: path.join(n8nDeskDir, 'llm.json') }))
+    expect(rootResult.success).toBe(false)
+    expect(rootResult.error).toContain('outside all allowed folders')
 
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('blocked for security')
+    const skillsResult = JSON.parse(await readText.invoke({ path: path.join(skillsDir, 'llm.json') }))
+    expect(skillsResult.success).toBe(false)
+    expect(skillsResult.error).toContain('blocked for security')
   })
 
   it('read_text allows auth.json in user project (not under ~/.n8n-desk/)', async () => {
@@ -385,15 +387,17 @@ describe('tools respect write deny-lists', () => {
   it('write to read-only mount is blocked', async () => {
     const n8nDeskDir = path.join(tmpDir, '.n8n-desk')
     const skillsDir = path.join(n8nDeskDir, 'skills')
+    const roDir = path.join(tmpDir, 'ro-folder')
     await fs.mkdir(skillsDir, { recursive: true })
+    await fs.mkdir(roDir, { recursive: true })
 
-    // Build policy with no attached folders — only n8n-desk ro and skills rw
-    const policy = buildCoworkPolicy([], n8nDeskDir)
+    // Attach a folder in user-chosen read-only mode
+    const policy = buildCoworkPolicy([{ path: roDir, mode: 'ro' }], n8nDeskDir)
     const tools = createFileTools(policy)
     const writeText = tools.find((t: { name: string }) => t.name === 'write_text')!
 
     const resultStr = await writeText.invoke({
-      path: path.join(n8nDeskDir, 'should-not-write.md'),
+      path: path.join(roDir, 'should-not-write.md'),
       content: 'attempt',
     })
     const result = JSON.parse(resultStr)
@@ -987,5 +991,278 @@ describe('search_files', () => {
     )
     expect(result.success).toBe(false)
     expect(result.error).toContain('outside all allowed folders')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// edit_text — partial edits (#7)
+// ---------------------------------------------------------------------------
+
+describe('edit_text', () => {
+  async function setupEditFixture() {
+    const projectDir = path.join(tmpDir, 'project')
+    await fs.mkdir(projectDir, { recursive: true })
+    const policy = await makeTestPolicy(projectDir)
+    const tools = createFileTools(policy)
+    const editFile = tools.find((t: { name: string }) => t.name === 'edit_text')!
+    const filePath = path.join(projectDir, 'config.md')
+    await fs.writeFile(filePath, '# Config\n\nvalue: alpha\nother: alpha\n')
+    return { editFile, filePath, projectDir, policy }
+  }
+
+  it('replaces a unique match', async () => {
+    const { editFile, filePath } = await setupEditFixture()
+    const result = JSON.parse(await editFile.invoke({
+      path: filePath,
+      old_string: 'value: alpha',
+      new_string: 'value: beta',
+    }))
+    expect(result.success).toBe(true)
+    expect(result.replacements).toBe(1)
+    const content = await fs.readFile(filePath, 'utf-8')
+    expect(content).toContain('value: beta')
+    expect(content).toContain('other: alpha')
+  })
+
+  it('rejects an ambiguous match unless replace_all is set', async () => {
+    const { editFile, filePath } = await setupEditFixture()
+    const ambiguous = JSON.parse(await editFile.invoke({
+      path: filePath,
+      old_string: 'alpha',
+      new_string: 'gamma',
+    }))
+    expect(ambiguous.success).toBe(false)
+    expect(ambiguous.error).toContain('2 times')
+
+    const all = JSON.parse(await editFile.invoke({
+      path: filePath,
+      old_string: 'alpha',
+      new_string: 'gamma',
+      replace_all: true,
+    }))
+    expect(all.success).toBe(true)
+    expect(all.replacements).toBe(2)
+    const content = await fs.readFile(filePath, 'utf-8')
+    expect(content).not.toContain('alpha')
+  })
+
+  it('errors clearly when old_string is not found', async () => {
+    const { editFile, filePath } = await setupEditFixture()
+    const result = JSON.parse(await editFile.invoke({
+      path: filePath,
+      old_string: 'does-not-exist',
+      new_string: 'x',
+    }))
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('not found')
+  })
+
+  it('is blocked on read-only mounts', async () => {
+    const n8nDeskDir = path.join(tmpDir, '.n8n-desk')
+    const roDir = path.join(tmpDir, 'ro-edit')
+    await fs.mkdir(path.join(n8nDeskDir, 'skills'), { recursive: true })
+    await fs.mkdir(roDir, { recursive: true })
+    await fs.writeFile(path.join(roDir, 'file.md'), 'content')
+
+    const policy = buildCoworkPolicy([{ path: roDir, mode: 'ro' }], n8nDeskDir)
+    const tools = createFileTools(policy)
+    const editFile = tools.find((t: { name: string }) => t.name === 'edit_text')!
+
+    const result = JSON.parse(await editFile.invoke({
+      path: path.join(roDir, 'file.md'),
+      old_string: 'content',
+      new_string: 'changed',
+    }))
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('read-only')
+  })
+
+  it('is blocked outside the sandbox', async () => {
+    const { editFile } = await setupEditFixture()
+    const outside = path.join(tmpDir, 'outside.md')
+    await fs.writeFile(outside, 'secret')
+    const result = JSON.parse(await editFile.invoke({
+      path: outside,
+      old_string: 'secret',
+      new_string: 'leak',
+    }))
+    expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// File management tools (audit #32)
+// ---------------------------------------------------------------------------
+
+describe('file management tools', () => {
+  async function setupManageFixture() {
+    const projectDir = path.join(tmpDir, 'project')
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.writeFile(path.join(projectDir, 'report.md'), 'the report')
+    const policy = await makeTestPolicy(projectDir)
+    const tools = createFileTools(policy)
+    const get = (name: string) => tools.find((t: { name: string }) => t.name === name)!
+    return { projectDir, tools, get }
+  }
+
+  it('move_file renames within the mount', async () => {
+    const { projectDir, get } = await setupManageFixture()
+    // Parent directories must already exist (same sandbox resolution rule as
+    // the write tools — a not-yet-existing parent cannot be realpath'd).
+    await fs.mkdir(path.join(projectDir, 'archive'), { recursive: true })
+    const result = JSON.parse(await get('move_file').invoke({
+      source: path.join(projectDir, 'report.md'),
+      destination: path.join(projectDir, 'archive', 'report-final.md'),
+    }))
+    expect(result.success).toBe(true)
+    await expect(fs.readFile(path.join(projectDir, 'archive', 'report-final.md'), 'utf-8'))
+      .resolves.toBe('the report')
+    await expect(fs.access(path.join(projectDir, 'report.md'))).rejects.toThrow()
+  })
+
+  it('move_file refuses to overwrite without the flag', async () => {
+    const { projectDir, get } = await setupManageFixture()
+    await fs.writeFile(path.join(projectDir, 'other.md'), 'existing')
+    const result = JSON.parse(await get('move_file').invoke({
+      source: path.join(projectDir, 'report.md'),
+      destination: path.join(projectDir, 'other.md'),
+    }))
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('already exists')
+  })
+
+  it('move/copy refuse read-denied sources (.env exfiltration via rename)', async () => {
+    const { projectDir, get } = await setupManageFixture()
+    await fs.writeFile(path.join(projectDir, '.env'), 'SECRET=1')
+    const moved = JSON.parse(await get('move_file').invoke({
+      source: path.join(projectDir, '.env'),
+      destination: path.join(projectDir, 'notes.txt'),
+    }))
+    expect(moved.success).toBe(false)
+    const copied = JSON.parse(await get('copy_file').invoke({
+      source: path.join(projectDir, '.env'),
+      destination: path.join(projectDir, 'notes.txt'),
+    }))
+    expect(copied.success).toBe(false)
+  })
+
+  it('move/copy/delete refuse read-only mounts, executables, and outside paths', async () => {
+    const n8nDeskDir = path.join(tmpDir, '.n8n-desk')
+    const roDir = path.join(tmpDir, 'ro-manage')
+    await fs.mkdir(path.join(n8nDeskDir, 'skills'), { recursive: true })
+    await fs.mkdir(roDir, { recursive: true })
+    await fs.writeFile(path.join(roDir, 'file.md'), 'x')
+    const policy = buildCoworkPolicy([{ path: roDir, mode: 'ro' }], n8nDeskDir)
+    const tools = createFileTools(policy)
+    const get = (name: string) => tools.find((t: { name: string }) => t.name === name)!
+
+    const del = JSON.parse(await get('delete_file').invoke({ path: path.join(roDir, 'file.md') }))
+    expect(del.success).toBe(false)
+    expect(del.error).toContain('read-only')
+
+    const mv = JSON.parse(await get('move_file').invoke({
+      source: path.join(roDir, 'file.md'),
+      destination: path.join(roDir, 'renamed.md'),
+    }))
+    expect(mv.success).toBe(false)
+
+    const outside = JSON.parse(await get('delete_file').invoke({ path: path.join(tmpDir, 'outside.md') }))
+    expect(outside.success).toBe(false)
+  })
+
+  it('copy_file cannot create executables', async () => {
+    const { projectDir, get } = await setupManageFixture()
+    const result = JSON.parse(await get('copy_file').invoke({
+      source: path.join(projectDir, 'report.md'),
+      destination: path.join(projectDir, 'evil.sh'),
+    }))
+    expect(result.success).toBe(false)
+  })
+
+  it('delete_file falls back to permanent deletion outside Electron', async () => {
+    const { projectDir, get } = await setupManageFixture()
+    const result = JSON.parse(await get('delete_file').invoke({
+      path: path.join(projectDir, 'report.md'),
+    }))
+    expect(result.success).toBe(true)
+    expect(result.method).toBe('permanent') // no Electron shell in vitest
+    await expect(fs.access(path.join(projectDir, 'report.md'))).rejects.toThrow()
+  })
+
+  it('open_path and clipboard degrade gracefully outside Electron', async () => {
+    const { projectDir, get } = await setupManageFixture()
+    const open = JSON.parse(await get('open_path').invoke({ path: path.join(projectDir, 'report.md') }))
+    expect(open.success).toBe(false)
+    expect(open.error).toContain('desktop app')
+
+    const read = JSON.parse(await get('clipboard_read').invoke({}))
+    expect(read.success).toBe(false)
+    const write = JSON.parse(await get('clipboard_write').invoke({ text: 'hi' }))
+    expect(write.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// read_text pagination + binary detection (audit #30)
+// ---------------------------------------------------------------------------
+
+describe('read_text pagination and binary detection', () => {
+  it('paginates by lines with offset/limit and reports totals', async () => {
+    const projectDir = path.join(tmpDir, 'project-rt')
+    await fs.mkdir(projectDir, { recursive: true })
+    const lines = Array.from({ length: 50 }, (_, i) => `line ${i}`)
+    await fs.writeFile(path.join(projectDir, 'big.txt'), lines.join('\n'))
+    const policy = await makeTestPolicy(projectDir)
+    const readText = createFileTools(policy).find((t: { name: string }) => t.name === 'read_text')!
+
+    const page = JSON.parse(await readText.invoke({
+      path: path.join(projectDir, 'big.txt'), offset: 10, limit: 5,
+    }))
+    expect(page.success).toBe(true)
+    expect(page.content).toBe('line 10\nline 11\nline 12\nline 13\nline 14')
+    expect(page.lineCount).toBe(50)
+    expect(page.returnedLines).toBe(5)
+    expect(page.truncated).toBe(true)
+
+    const full = JSON.parse(await readText.invoke({ path: path.join(projectDir, 'big.txt') }))
+    expect(full.truncated).toBe(false)
+    expect(full.returnedLines).toBe(50)
+  })
+
+  it('rejects binary files with an actionable error', async () => {
+    const projectDir = path.join(tmpDir, 'project-bin')
+    await fs.mkdir(projectDir, { recursive: true })
+    // PNG-ish header with NUL bytes
+    await fs.writeFile(path.join(projectDir, 'image.dat'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]))
+    const policy = await makeTestPolicy(projectDir)
+    const readText = createFileTools(policy).find((t: { name: string }) => t.name === 'read_text')!
+
+    const result = JSON.parse(await readText.invoke({ path: path.join(projectDir, 'image.dat') }))
+    expect(result.success).toBe(false)
+    expect(result.type).toBe('binary_file')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// read_csv streaming offset (audit #55)
+// ---------------------------------------------------------------------------
+
+describe('read_csv offset pagination', () => {
+  it('returns the requested window with exact totals', async () => {
+    const projectDir = path.join(tmpDir, 'project-csv')
+    await fs.mkdir(projectDir, { recursive: true })
+    const rows = ['id,value', ...Array.from({ length: 300 }, (_, i) => `${i},val_${i}`)]
+    await fs.writeFile(path.join(projectDir, 'data.csv'), rows.join('\n') + '\n')
+    const policy = await makeTestPolicy(projectDir)
+    const readCsv = createFileTools(policy).find((t: { name: string }) => t.name === 'read_csv')!
+
+    const result = JSON.parse(await readCsv.invoke({
+      path: path.join(projectDir, 'data.csv'), offset: 100, limit: 10,
+    }))
+    expect(result.success).toBe(true)
+    expect(result.rows).toHaveLength(10)
+    expect(result.rows[0].id).toBe(100)
+    expect(result.totalRows).toBe(300)
+    expect(result.truncated).toBe(true)
   })
 })

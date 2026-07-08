@@ -63,6 +63,10 @@ if (!gotTheLock) {
     registerPushProxyHandlers()
     registerPluginHandlers()
     registerDialogHandlers()
+    // Agent events must reach the CURRENT window: on macOS the window is
+    // destroyed on close and recreated on dock-activate, so the handlers get
+    // a live accessor instead of a captured reference (audit #15).
+    registerAgentHandlers(() => mainWindow)
 
     createWindow()
   })
@@ -99,9 +103,6 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
   })
-
-  // Agent handlers need the mainWindow reference for event streaming
-  registerAgentHandlers(mainWindow)
 
   // In dev, load from Vite dev server; in prod, load built files
   if (isDev) {

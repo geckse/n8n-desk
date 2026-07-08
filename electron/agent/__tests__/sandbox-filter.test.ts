@@ -555,7 +555,7 @@ describe('resolveAndValidatePath', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildCoworkPolicy integration', () => {
-  it('builds policy with attached folders, skills rw, and n8n-desk ro', async () => {
+  it('builds policy with attached folders + skills rw only (no whole n8n-desk mount)', async () => {
     const n8nDeskDir = path.join(tmpDir, '.n8n-desk')
     const skillsDir = path.join(n8nDeskDir, 'skills')
     const projectDir = path.join(tmpDir, 'my-project')
@@ -567,23 +567,40 @@ describe('buildCoworkPolicy integration', () => {
       n8nDeskDir,
     )
 
-    // Should have 3 mounts: project (rw), skills (rw), n8n-desk (ro)
-    expect(policy.mounts).toHaveLength(3)
+    // Exactly 2 mounts: project (rw), skills (rw). The rest of ~/.n8n-desk
+    // (instances, sessions, configs) must NOT be mounted at all.
+    expect(policy.mounts).toHaveLength(2)
 
     // Project folder should be rw
-    const projectMount = policy.mounts.find(m => m.virtualPrefix.includes('workspace'))
+    const projectMount = policy.mounts.find(m => m.hostPath === path.resolve(projectDir))
     expect(projectMount?.mode).toBe('rw')
 
     // Skills should be rw
     const skillsMount = policy.mounts.find(m => m.virtualPrefix.includes('skills'))
     expect(skillsMount?.mode).toBe('rw')
 
-    // n8n-desk should be ro
-    const n8nDeskMount = policy.mounts.find(m =>
-      m.virtualPrefix === '/n8n-desk/' ||
-      (m.virtualPrefix.includes('n8n-desk') && !m.virtualPrefix.includes('skills')),
-    )
-    expect(n8nDeskMount?.mode).toBe('ro')
+    // No mount may cover the n8n-desk root
+    const n8nDeskRootMount = policy.mounts.find(m => m.hostPath === path.resolve(n8nDeskDir))
+    expect(n8nDeskRootMount).toBeUndefined()
+  })
+
+  it('honors the per-folder read-only mode from the renderer', async () => {
+    const n8nDeskDir = path.join(tmpDir, '.n8n-desk')
+    const roDir = path.join(tmpDir, 'ro-project')
+    await fs.mkdir(path.join(n8nDeskDir, 'skills'), { recursive: true })
+    await fs.mkdir(roDir, { recursive: true })
+
+    const policy = buildCoworkPolicy([{ path: roDir, mode: 'ro' }], n8nDeskDir)
+    const roMount = policy.mounts.find(m => m.hostPath === path.resolve(roDir))
+    expect(roMount?.mode).toBe('ro')
+
+    const target = path.join(roDir, 'note.md')
+    await fs.writeFile(target, 'existing')
+    const pathResult = await resolveAndValidatePath(target, policy)
+    expect(pathResult.allowed).toBe(true)
+    const writeResult = isWriteAllowed(pathResult.resolvedPath!, policy)
+    expect(writeResult.allowed).toBe(false)
+    expect(writeResult.error).toContain('read-only')
   })
 
   it('skills directory allows write through full policy', async () => {
@@ -605,7 +622,7 @@ describe('buildCoworkPolicy integration', () => {
     }
   })
 
-  it('n8n-desk root blocks write through full policy', async () => {
+  it('n8n-desk root is entirely outside the policy (no read, no write)', async () => {
     const n8nDeskDir = path.join(tmpDir, '.n8n-desk')
     await fs.mkdir(n8nDeskDir, { recursive: true })
     await fs.mkdir(path.join(n8nDeskDir, 'skills'), { recursive: true })
@@ -616,13 +633,8 @@ describe('buildCoworkPolicy integration', () => {
     await fs.writeFile(configFile, '{}')
 
     const pathResult = await resolveAndValidatePath(configFile, policy)
-    expect(pathResult.allowed).toBe(true) // path is within n8n-desk mount (ro)
-
-    if (pathResult.allowed && pathResult.resolvedPath) {
-      const writeResult = isWriteAllowed(pathResult.resolvedPath, policy)
-      expect(writeResult.allowed).toBe(false)
-      expect(writeResult.error).toContain('read-only')
-    }
+    expect(pathResult.allowed).toBe(false)
+    expect(pathResult.error).toContain('outside all allowed folders')
   })
 
   it('auth.json under ~/.n8n-desk/ is blocked for read but allowed in user project', async () => {

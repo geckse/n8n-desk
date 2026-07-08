@@ -28,8 +28,10 @@ export const SENSITIVE_READ_DENY_EXTENSIONS: ReadonlySet<string> = new Set([
 export const SENSITIVE_READ_DENY_N8N_DESK_FILENAMES: ReadonlySet<string> = new Set([
   'credentials.json',
   'tokens.enc',
+  'mcp-tokens.enc',
   'llm.json',
   'auth.json',
+  'mcp-auth.json',
 ])
 
 /**
@@ -79,66 +81,74 @@ export const WRITABLE_EXTENSIONS: ReadonlySet<string> = new Set([
 // Policy builders
 // ---------------------------------------------------------------------------
 
+/** An attached folder with the user-chosen access mode. */
+export interface AttachedFolderInput {
+  path: string
+  /** User-chosen access level. Defaults to 'rw' when absent. */
+  mode?: 'ro' | 'rw'
+}
+
 /**
  * Shared folder mount structure for user-attached folders.
- * Maps each attached folder as a read-write mount under /workspace/.
+ *
+ * ONE path convention everywhere (audit #31): the route prefix each mount
+ * exposes IS the host path. The shared file tools, the deepagents built-in
+ * file tools (via CompositeBackend routes), and the paths injected into the
+ * system prompt all address files by the same host-absolute path — the agent
+ * never has to translate between `/workspace/...` aliases and real paths.
  */
 function buildAttachedFolderMounts(
-  attachedFolders: Array<{ path: string }>,
+  attachedFolders: AttachedFolderInput[],
 ): SandboxFolderMount[] {
-  return attachedFolders.map((folder, index) => {
-    const basename = path.basename(folder.path)
-    // Use index suffix to avoid collisions when multiple folders share the same basename
-    const prefix = attachedFolders.length > 1
-      ? `/workspace/${basename}-${index}/`
-      : `/workspace/${basename}/`
-
+  return attachedFolders.map((folder) => {
+    const hostPath = path.resolve(folder.path)
     return {
-      hostPath: path.resolve(folder.path),
-      virtualPrefix: prefix,
-      mode: 'rw' as const,
+      hostPath,
+      virtualPrefix: `${hostPath}/`,
+      mode: folder.mode ?? 'rw',
     }
   })
 }
 
 /**
- * Build a filesystem sandbox policy for Cowork mode sessions.
+ * Build the shared mount set for agent sessions.
  *
  * Mounts:
- * - Each user-attached folder as read-write under /workspace/
+ * - Each user-attached folder at its own host path, honoring its access mode
  * - ~/.n8n-desk/skills/ as read-write (agent can create/edit skills)
- * - ~/.n8n-desk/ as read-only (minus sensitive files, enforced by sandbox-filter)
+ *
+ * The rest of ~/.n8n-desk/ is deliberately NOT mounted: it holds every
+ * instance's session history and config. Mount only what the agent needs
+ * (CLAUDE.md hard invariant).
+ */
+function buildMounts(
+  attachedFolders: AttachedFolderInput[],
+  resolvedN8nDeskDir: string,
+): SandboxFolderMount[] {
+  const skillsDir = path.join(resolvedN8nDeskDir, 'skills')
+  return [
+    ...buildAttachedFolderMounts(attachedFolders),
+    {
+      hostPath: skillsDir,
+      virtualPrefix: `${skillsDir}/`,
+      mode: 'rw',
+    },
+  ]
+}
+
+/**
+ * Build a filesystem sandbox policy for Cowork mode sessions.
  *
  * @param attachedFolders - Folders the user attached to this session
  * @param n8nDeskDir - Absolute path to ~/.n8n-desk/
  */
 export function buildCoworkPolicy(
-  attachedFolders: Array<{ path: string }>,
+  attachedFolders: AttachedFolderInput[],
   n8nDeskDir: string,
 ): FilesystemSandboxPolicy {
   const resolvedN8nDeskDir = path.resolve(n8nDeskDir)
-
-  const mounts: SandboxFolderMount[] = [
-    // User-attached folders (read-write)
-    ...buildAttachedFolderMounts(attachedFolders),
-
-    // Skills directory is always writable
-    {
-      hostPath: path.join(resolvedN8nDeskDir, 'skills'),
-      virtualPrefix: '/n8n-desk/skills/',
-      mode: 'rw',
-    },
-
-    // ~/.n8n-desk/ is readable (sensitive files filtered by sandbox-filter)
-    {
-      hostPath: resolvedN8nDeskDir,
-      virtualPrefix: '/n8n-desk/',
-      mode: 'ro',
-    },
-  ]
-
   return {
-    mounts,
+    mounts: buildMounts(attachedFolders, resolvedN8nDeskDir),
     n8nDeskDir: resolvedN8nDeskDir,
   }
 }
@@ -150,41 +160,98 @@ export function buildCoworkPolicy(
  * for reading workflow SDK code from attached folders or writing generated
  * artifacts.
  *
- * Mounts:
- * - Each user-attached folder as read-write under /workspace/
- * - ~/.n8n-desk/skills/ as read-write
- * - ~/.n8n-desk/ as read-only (minus sensitive files, enforced by sandbox-filter)
- *
  * @param attachedFolders - Folders the user attached to this session
  * @param n8nDeskDir - Absolute path to ~/.n8n-desk/
  */
 export function buildWorkflowPolicy(
-  attachedFolders: Array<{ path: string }>,
+  attachedFolders: AttachedFolderInput[],
   n8nDeskDir: string,
 ): FilesystemSandboxPolicy {
   const resolvedN8nDeskDir = path.resolve(n8nDeskDir)
-
-  const mounts: SandboxFolderMount[] = [
-    // User-attached folders (read-write)
-    ...buildAttachedFolderMounts(attachedFolders),
-
-    // Skills directory is always writable
-    {
-      hostPath: path.join(resolvedN8nDeskDir, 'skills'),
-      virtualPrefix: '/n8n-desk/skills/',
-      mode: 'rw',
-    },
-
-    // ~/.n8n-desk/ is readable (sensitive files filtered by sandbox-filter)
-    {
-      hostPath: resolvedN8nDeskDir,
-      virtualPrefix: '/n8n-desk/',
-      mode: 'ro',
-    },
-  ]
-
   return {
-    mounts,
+    mounts: buildMounts(attachedFolders, resolvedN8nDeskDir),
     n8nDeskDir: resolvedN8nDeskDir,
   }
+}
+
+// ---------------------------------------------------------------------------
+// deepagents built-in file tools — permission rules
+// ---------------------------------------------------------------------------
+
+/** Mirrors deepagents' FilesystemPermission (kept structural to avoid a type import). */
+export interface BuiltinFsPermission {
+  operations: ReadonlyArray<'read' | 'write'>
+  paths: string[]
+  mode?: 'allow' | 'deny'
+}
+
+/**
+ * Translate a sandbox policy into deepagents `permissions` rules for the
+ * built-in file tools (ls/read_file/write_file/edit_file/glob/grep).
+ *
+ * The built-ins operate on the CompositeBackend route prefixes, which since
+ * the path unification (audit #31) ARE the host paths — rules are expressed
+ * against `mount.virtualPrefix` (= host path) and `policy.n8nDeskDir`. Rules
+ * are evaluated first-match-wins with a permissive default, so the order is:
+ *
+ *   1. read-deny for sensitive extensions and dotfiles (global)
+ *   2. read-deny for app-internal filenames under ~/.n8n-desk/
+ *   3. write-deny for every read-only mount
+ *   4. write-deny for executable extensions (global)
+ *   5. write-allow for the extension allowlist
+ *   6. write-deny catch-all for any other extension
+ *      (extensionless files fall through to the permissive default — same
+ *      semantics as isWriteAllowed)
+ *
+ * This is the SAME policy `sandbox-filter.ts` enforces for the custom file
+ * tools — the two layers must stay in sync.
+ */
+export function buildFilesystemPermissions(
+  policy: FilesystemSandboxPolicy,
+): BuiltinFsPermission[] {
+  const rules: BuiltinFsPermission[] = []
+
+  // 1. Sensitive read deny — extensions plus their bare-dotfile forms
+  //    (`/**/*.env` does not match a file literally named `.env`).
+  const readDenyPaths: string[] = []
+  for (const ext of SENSITIVE_READ_DENY_EXTENSIONS) {
+    readDenyPaths.push(`/**/*${ext}`)
+    readDenyPaths.push(`/**/${ext}`)
+    readDenyPaths.push(`/**/${ext}.*`)
+  }
+  rules.push({ operations: ['read'], paths: readDenyPaths, mode: 'deny' })
+
+  // 2. App-internal filenames under ~/.n8n-desk/
+  rules.push({
+    operations: ['read'],
+    paths: [...SENSITIVE_READ_DENY_N8N_DESK_FILENAMES].map(
+      (name) => `${policy.n8nDeskDir}/**/${name}`,
+    ),
+    mode: 'deny',
+  })
+
+  // 3. Read-only mounts reject writes
+  for (const mount of policy.mounts) {
+    if (mount.mode === 'ro') {
+      rules.push({
+        operations: ['write'],
+        paths: [`${mount.virtualPrefix}**`],
+        mode: 'deny',
+      })
+    }
+  }
+
+  // 4. Executable extensions are never writable
+  rules.push({
+    operations: ['write'],
+    paths: [...SENSITIVE_WRITE_DENY_EXTENSIONS].map((ext) => `/**/*${ext}`),
+    mode: 'deny',
+  })
+
+  // 5 + 6. Extension allowlist, then catch-all deny for other extensions
+  const allowedExts = [...WRITABLE_EXTENSIONS].map((ext) => ext.slice(1)).join(',')
+  rules.push({ operations: ['write'], paths: [`/**/*.{${allowedExts}}`], mode: 'allow' })
+  rules.push({ operations: ['write'], paths: ['/**/*.*'], mode: 'deny' })
+
+  return rules
 }

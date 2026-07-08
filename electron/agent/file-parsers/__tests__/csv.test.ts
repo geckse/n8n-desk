@@ -338,3 +338,30 @@ describe('CSV error handling', () => {
     expect(result.rows[0]['Notes']).toContain('Line 2')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Streaming offset pagination (audit #55)
+// ---------------------------------------------------------------------------
+
+describe('CSV streaming offset', () => {
+  it('returns the requested window with exact totals', async () => {
+    const filePath = path.join(tmpDir, 'offset.csv')
+    const lines = ['Id', ...Array.from({ length: 50 }, (_, i) => `${i}`)]
+    await fs.writeFile(filePath, lines.join('\n') + '\n')
+
+    const result = await readCsv(filePath, { offset: 20, maxRows: 5 }) as ReadCsvResult
+    expect(result.rows).toHaveLength(5)
+    expect(result.rows[0]['Id']).toBe(20)
+    expect(result.totalRows).toBe(50)
+    expect(result.truncated).toBe(true)
+  })
+
+  it('handles quoted embedded newlines across the offset window', async () => {
+    const filePath = path.join(tmpDir, 'offset-quoted.csv')
+    await fs.writeFile(filePath, 'Name,Notes\nA,"line1\nline2"\nB,"x"\nC,"y"\n')
+
+    const result = await readCsv(filePath, { offset: 1, maxRows: 2 }) as ReadCsvResult
+    expect(result.rows.map((r) => r['Name'])).toEqual(['B', 'C'])
+    expect(result.totalRows).toBe(3)
+  })
+})

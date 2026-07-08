@@ -44,6 +44,8 @@ export interface ReadCsvOptions {
   delimiter?: string
   /** Whether the first row is a header row (default: true). */
   header?: boolean
+  /** Number of data rows to skip before collecting (default: 0). */
+  offset?: number
   /** Maximum number of rows to return (default: 100 for large files). */
   maxRows?: number
   /** Character encoding (default: 'utf-8'). */
@@ -63,17 +65,28 @@ export interface WriteCsvOptions {
 // Read
 // ---------------------------------------------------------------------------
 
+/** Shape of a per-chunk result delivered to PapaParse's chunk callback. */
+interface PapaChunkResult {
+  data: Record<string, unknown>[]
+  errors: Array<{ type: string; row?: number; message: string }>
+  meta: { fields?: string[]; delimiter?: string }
+}
+
 /**
- * Read and parse a CSV file from disk.
+ * Read and parse a CSV file from disk, streaming row by row.
  *
  * - Checks file size before reading (100 MB limit).
- * - Uses PapaParse with `dynamicTyping` and `skipEmptyLines` for clean output.
+ * - STREAMS the file through PapaParse's step API instead of materializing
+ *   every row object: only the requested `offset`..`offset+maxRows` window is
+ *   kept in memory; rows outside it are counted and discarded (audit #55).
+ *   Quoted embedded newlines stay correct because the CSV parser itself does
+ *   the row splitting.
+ * - Uses `dynamicTyping` and `skipEmptyLines` for clean output.
  * - Auto-detects delimiter when not specified.
- * - Returns paginated results for large files (first 100 rows + total count).
  * - Returns descriptive error on failure, never throws.
  *
  * @param filePath - Absolute path to the CSV file (must already be sandbox-validated)
- * @param options  - Read options (delimiter override, header, maxRows, encoding)
+ * @param options  - Read options (delimiter override, header, offset, maxRows, encoding)
  */
 export async function readCsv(
   filePath: string,
@@ -82,13 +95,12 @@ export async function readCsv(
   const {
     delimiter,
     header = true,
+    offset = 0,
     maxRows = PAGINATION_ROW_LIMIT,
     encoding = 'utf-8',
   } = options
 
-  let rawContent: string
   let sizeBytes: number
-
   try {
     const stat = await fs.stat(filePath)
     sizeBytes = stat.size
@@ -101,8 +113,6 @@ export async function readCsv(
         type: 'size_limit',
       }
     }
-
-    rawContent = await fs.readFile(filePath, { encoding })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     return {
@@ -115,51 +125,87 @@ export async function readCsv(
   try {
     // Lazy-load papaparse to avoid loading ~200KB for agents that don't need CSV
     const Papa = await import('papaparse')
+    const { createReadStream } = await import('fs')
 
-    const parseResult = Papa.parse(rawContent, {
-      header,
-      dynamicTyping: true,
-      skipEmptyLines: true,
-      delimiter: delimiter ?? undefined,
-    })
+    return await new Promise<ReadCsvResult | FileParserError>((resolve) => {
+      const rows: Record<string, unknown>[] = []
+      const criticalErrors: Array<{ type: string; row?: number; message: string }> = []
+      let totalRows = 0
+      let headers: string[] = []
+      let detectedDelimiter = delimiter ?? ','
+      let settled = false
 
-    if (parseResult.errors.length > 0) {
-      // Filter to critical errors (missing quotes, etc.) — row-level warnings are okay
-      const criticalErrors = parseResult.errors.filter(
-        (e: { type: string; row?: number; message: string }) =>
-          e.type === 'Quotes' || e.type === 'FieldMismatch',
-      )
-      if (criticalErrors.length > 0 && parseResult.data.length === 0) {
-        const firstError = criticalErrors[0]
-        return {
-          success: false,
-          error: `Malformed CSV at row ${firstError.row}: ${firstError.message}`,
-          type: 'parse_error',
-        }
+      const settle = (result: ReadCsvResult | FileParserError): void => {
+        if (settled) return
+        settled = true
+        resolve(result)
       }
-    }
 
-    const allRows = parseResult.data as Record<string, unknown>[]
-    const totalRows = allRows.length
-    const truncated = totalRows > maxRows
-    const rows = truncated ? allRows.slice(0, maxRows) : allRows
+      const stream = createReadStream(filePath, { encoding })
+      stream.on('error', (err) => {
+        settle({
+          success: false,
+          error: `Failed to read CSV file: ${err.message}`,
+          type: 'read_error',
+        })
+      })
 
-    // Derive headers from meta or first row keys
-    const headers: string[] = header
-      ? (parseResult.meta.fields ?? [])
-      : []
+      // PapaParse accepts Node readable streams; its bundled types only cover
+      // the string/File overloads.
+      ;(Papa.parse as unknown as (input: unknown, config: unknown) => void)(stream, {
+        header,
+        dynamicTyping: true,
+        skipEmptyLines: true,
+        delimiter: delimiter ?? undefined,
+        // chunk (not step): it also fires for a header-only file, so the
+        // detected headers/delimiter survive even with zero data rows.
+        chunk: (result: PapaChunkResult) => {
+          if (result.meta) {
+            if (header && result.meta.fields) headers = result.meta.fields
+            if (result.meta.delimiter) detectedDelimiter = result.meta.delimiter
+          }
+          for (const e of result.errors ?? []) {
+            if (e.type === 'Quotes' || e.type === 'FieldMismatch') criticalErrors.push(e)
+          }
 
-    const detectedDelimiter = parseResult.meta.delimiter ?? ','
-
-    return {
-      success: true,
-      headers,
-      rows,
-      totalRows,
-      truncated,
-      sizeBytes,
-      delimiter: detectedDelimiter,
-    }
+          for (const row of result.data) {
+            const index = totalRows
+            totalRows++
+            // Keep only the requested window — everything else is just counted.
+            if (index >= offset && rows.length < maxRows) {
+              rows.push(row)
+            }
+          }
+        },
+        complete: () => {
+          if (criticalErrors.length > 0 && totalRows === 0) {
+            const firstError = criticalErrors[0]
+            settle({
+              success: false,
+              error: `Malformed CSV at row ${firstError.row}: ${firstError.message}`,
+              type: 'parse_error',
+            })
+            return
+          }
+          settle({
+            success: true,
+            headers,
+            rows,
+            totalRows,
+            truncated: offset > 0 || totalRows > offset + rows.length,
+            sizeBytes,
+            delimiter: detectedDelimiter,
+          })
+        },
+        error: (err: Error) => {
+          settle({
+            success: false,
+            error: `Failed to parse CSV: ${err.message}`,
+            type: 'parse_error',
+          })
+        },
+      })
+    })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     return {

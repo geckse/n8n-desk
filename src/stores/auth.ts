@@ -20,6 +20,9 @@ export const useAuthStore = defineStore('auth', () => {
   const expiresAt = ref<string | null>(null)
   const userProfile = ref<UserProfile | null>(null)
   const sessionExpired = ref(false)
+  // Sign-in explicitly requested (e.g. from Settings → Connection) — raises
+  // the same credential modal as sessionExpired, with non-expired copy.
+  const reLoginRequested = ref(false)
 
   const isAuthenticated = computed(() => accessToken.value !== null || sessionToken.value !== null)
   const isFullAccess = computed(() => userRole.value !== 'chatUser' && userRole.value !== 'unknown')
@@ -161,8 +164,13 @@ export const useAuthStore = defineStore('auth', () => {
     sessionExpired.value = true
   }
 
+  function requestReLogin(): void {
+    reLoginRequested.value = true
+  }
+
   function clearSessionExpired(): void {
     sessionExpired.value = false
+    reLoginRequested.value = false
   }
 
   function reset(): void {
@@ -174,6 +182,7 @@ export const useAuthStore = defineStore('auth', () => {
     expiresAt.value = null
     userProfile.value = null
     sessionExpired.value = false
+    reLoginRequested.value = false
   }
 
   return {
@@ -181,6 +190,7 @@ export const useAuthStore = defineStore('auth', () => {
     sessionToken,
     browserId,
     sessionExpired,
+    reLoginRequested,
     userRole,
     userProfile,
     scopes,
@@ -195,6 +205,7 @@ export const useAuthStore = defineStore('auth', () => {
     logout,
     refresh,
     markSessionExpired,
+    requestReLogin,
     clearSessionExpired,
     reset,
   }

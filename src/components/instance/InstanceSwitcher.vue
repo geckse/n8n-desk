@@ -7,9 +7,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useInstancesStore } from '@/stores/instances'
-import { useAuthStore } from '@/stores/auth'
-import { useWorkflowSessionsStore } from '@/stores/workflow-sessions'
-import { useCoworkSessionsStore } from '@/stores/cowork-sessions'
+import { useInstanceSwitch } from '@/composables/useInstanceSwitch'
 import InstanceEditModal from './InstanceEditModal.vue'
 
 defineProps<{
@@ -19,9 +17,7 @@ defineProps<{
 const router = useRouter()
 const { t } = useI18n()
 const instancesStore = useInstancesStore()
-const authStore = useAuthStore()
-const workflowSessionsStore = useWorkflowSessionsStore()
-const coworkSessionsStore = useCoworkSessionsStore()
+const { switchTo: performSwitch } = useInstanceSwitch()
 
 const popover = defineModel<boolean>('isOpen', { default: false })
 
@@ -36,24 +32,9 @@ function openEdit(event: Event, instanceId: string): void {
 }
 
 async function switchTo(instanceId: string): Promise<void> {
-  if (instanceId === instancesStore.activeInstanceId) {
-    popover.value = false
-    return
-  }
-
-  // Full context swap
-  authStore.reset()
-  workflowSessionsStore.reset()
-  coworkSessionsStore.reset()
-  await instancesStore.setActive(instanceId)
-  await authStore.hydrate(instanceId)
-  await workflowSessionsStore.hydrate(instanceId)
-  await coworkSessionsStore.hydrate(instanceId)
-
+  // Full context swap (no-op when already active)
+  await performSwitch(instanceId)
   popover.value = false
-
-  // Navigate to chat as default landing
-  router.replace('/chat')
 }
 
 function addInstance(): void {

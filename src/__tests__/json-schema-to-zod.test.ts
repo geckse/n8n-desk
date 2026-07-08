@@ -178,9 +178,10 @@ describe('jsonSchemaToZod', () => {
   })
 
   describe('fallback / unknown types', () => {
-    it('falls back to z.any() for unknown type', () => {
+    it('maps type null to z.null()', () => {
       const schema = jsonSchemaToZod({ type: 'null' })
-      expect(schema).toBeInstanceOf(z.ZodAny)
+      expect(schema.safeParse(null).success).toBe(true)
+      expect(schema.safeParse('x').success).toBe(false)
     })
 
     it('falls back to z.any() for missing type', () => {
@@ -188,11 +189,158 @@ describe('jsonSchemaToZod', () => {
       expect(schema).toBeInstanceOf(z.ZodAny)
     })
 
-    it('falls back to z.any() for complex constructs like allOf', () => {
+    it('converts allOf of mixed branches via intersection', () => {
       const schema = jsonSchemaToZod({
         allOf: [{ type: 'string' }, { minLength: 1 }],
       })
-      expect(schema).toBeInstanceOf(z.ZodAny)
+      // string branch enforced; the unsupported minLength branch degrades to any
+      expect(schema.safeParse('hello').success).toBe(true)
+      expect(schema.safeParse(42).success).toBe(false)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Real n8n MCP server schemas (ground truth from
+// n8n-master/packages/cli/src/modules/mcp/) — the discriminated-union
+// execute_workflow inputs and anyOf-based get_node_types must round-trip.
+// ---------------------------------------------------------------------------
+
+describe('real n8n MCP schemas', () => {
+  it('execute_workflow: accepts chat/form/webhook inputs, rejects garbage', () => {
+    // JSON Schema serialization of the server's zod discriminatedUnion
+    const schema = jsonSchemaToZod({
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string', description: 'The ID of the workflow to execute' },
+        executionMode: { type: 'string', enum: ['manual', 'production'], default: 'production' },
+        inputs: {
+          anyOf: [
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'chat' },
+                chatInput: { type: 'string' },
+              },
+              required: ['type', 'chatInput'],
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'form' },
+                formData: { type: 'object', additionalProperties: {} },
+              },
+              required: ['type', 'formData'],
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'webhook' },
+                webhookData: {
+                  type: 'object',
+                  properties: {
+                    method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], default: 'GET' },
+                    query: { type: 'object', additionalProperties: { type: 'string' } },
+                    body: { type: 'object', additionalProperties: {} },
+                  },
+                },
+              },
+              required: ['type', 'webhookData'],
+            },
+          ],
+        },
+      },
+      required: ['workflowId'],
+    })
+
+    expect(schema.safeParse({
+      workflowId: '42',
+      executionMode: 'manual',
+      inputs: { type: 'chat', chatInput: 'hello' },
+    }).success).toBe(true)
+
+    expect(schema.safeParse({
+      workflowId: '42',
+      inputs: { type: 'webhook', webhookData: { method: 'POST', body: { a: 1 } } },
+    }).success).toBe(true)
+
+    // Old client bug shape: inputData is not a valid field but extra keys are
+    // stripped/ignored by zod objects — the critical check is that the REAL
+    // fields validate and a malformed union member fails.
+    expect(schema.safeParse({
+      workflowId: '42',
+      inputs: { type: 'chat' }, // missing chatInput
+    }).success).toBe(false)
+
+    expect(schema.safeParse({ inputs: { type: 'chat', chatInput: 'x' } }).success).toBe(false) // missing workflowId
+  })
+
+  it('search_nodes: queries must be a non-empty string array', () => {
+    const schema = jsonSchemaToZod({
+      type: 'object',
+      properties: {
+        queries: { type: 'array', items: { type: 'string' }, minItems: 1 },
+      },
+      required: ['queries'],
+    })
+    expect(schema.safeParse({ queries: ['gmail', 'slack'] }).success).toBe(true)
+    // The OLD hardcoded wrapper sent { query: string } — must fail now
+    expect(schema.safeParse({ query: 'gmail' }).success).toBe(false)
+  })
+
+  it('get_node_types: anyOf(string | object-with-discriminators) round-trips', () => {
+    const schema = jsonSchemaToZod({
+      type: 'object',
+      properties: {
+        nodeIds: {
+          type: 'array',
+          items: {
+            anyOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  nodeId: { type: 'string' },
+                  resource: { type: 'string' },
+                  operation: { type: 'string' },
+                },
+                required: ['nodeId'],
+              },
+            ],
+          },
+        },
+      },
+      required: ['nodeIds'],
+    })
+    expect(schema.safeParse({ nodeIds: ['n8n-nodes-base.gmail'] }).success).toBe(true)
+    expect(schema.safeParse({
+      nodeIds: [{ nodeId: 'n8n-nodes-base.gmail', resource: 'message', operation: 'send' }],
+    }).success).toBe(true)
+    expect(schema.safeParse({ nodeIds: [42] }).success).toBe(false)
+  })
+
+  it('numeric enums survive conversion', () => {
+    const schema = jsonSchemaToZod({ enum: [1, 2, 3] })
+    expect(schema.safeParse(2).success).toBe(true)
+    expect(schema.safeParse(4).success).toBe(false)
+    expect(schema.safeParse('2').success).toBe(false)
+  })
+
+  it('nullable type arrays survive conversion', () => {
+    const schema = jsonSchemaToZod({ type: ['string', 'null'] })
+    expect(schema.safeParse('x').success).toBe(true)
+    expect(schema.safeParse(null).success).toBe(true)
+    expect(schema.safeParse(5).success).toBe(false)
+  })
+
+  it('defaults are applied', () => {
+    const schema = jsonSchemaToZod({
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['manual', 'production'], default: 'production' },
+      },
+    })
+    const parsed = schema.parse({})
+    expect((parsed as { mode: string }).mode).toBe('production')
   })
 })

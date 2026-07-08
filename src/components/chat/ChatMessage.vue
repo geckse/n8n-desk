@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Copy, Check } from 'lucide-vue-next'
 import type { SessionMessage } from '@/types/session'
 import type { ChatMessageContentChunk } from '@/types/chathub'
@@ -16,6 +17,8 @@ const emit = defineEmits<{
   edit: [messageId: string]
   regenerate: [messageId: string]
 }>()
+
+const { t } = useI18n()
 
 const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
@@ -150,7 +153,7 @@ async function copyMessage(): Promise<void> {
         <button
           v-if="!isSystem && !isStreaming"
           :class="[$style.actionBtn, justCopied && $style.actionBtnSuccess]"
-          :title="justCopied ? 'Copied!' : 'Copy message'"
+          :title="justCopied ? t('chat.messages.copied') : t('chat.messages.copy')"
           @click="copyMessage"
         >
           <Check v-if="justCopied" :size="14" />
@@ -159,7 +162,7 @@ async function copyMessage(): Promise<void> {
         <button
           v-if="isUser"
           :class="$style.actionBtn"
-          title="Edit message"
+          :title="t('chat.messages.edit')"
           @click="emit('edit', message.id)"
         >
           ✎
@@ -167,7 +170,7 @@ async function copyMessage(): Promise<void> {
         <button
           v-if="isAssistant && !isStreaming"
           :class="$style.actionBtn"
-          title="Regenerate response"
+          :title="t('chat.messages.regenerate')"
           @click="emit('regenerate', message.id)"
         >
           ↻

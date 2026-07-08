@@ -232,20 +232,28 @@ export async function loadAllSkills(): Promise<LoadedSkill[]> {
  * This ensures lazy loading: the agent sees what skills exist and can
  * invoke them by name, but full content is only expanded on invocation.
  *
- * Output format:
- * ```
- * ## Available Skills
- * - /skill-name: Short description of what this skill does
- * - /another-skill: Another description
- * ```
+ * The block explicitly teaches the invocation mechanism (invoke_skill /
+ * read_skill_file) — lazy loading must not depend on the model inferring it
+ * (audit #58).
  *
  * Returns null if no skills are provided.
  */
 export function buildSkillDescriptions(skills: LoadedSkill[]): string | null {
   if (skills.length === 0) return null
 
-  const lines = skills.map((s) => `- /${s.name}: ${s.description}`)
-  return `## Available Skills\n${lines.join('\n')}`
+  const lines = skills.map((s) => `- ${s.name}: ${s.description}`)
+  return [
+    '## Available Skills',
+    '',
+    'Skills are packaged step-by-step instructions for specific tasks. Only the',
+    'names and descriptions below are loaded — when a task matches a skill, call',
+    'the **invoke_skill** tool with its `skillName` (and optional `arguments`)',
+    'BEFORE attempting the task on your own, then follow the returned',
+    'instructions. If the returned content references supporting files (for',
+    'example PATTERNS.md), load them with **read_skill_file**.',
+    '',
+    ...lines,
+  ].join('\n')
 }
 
 // --- Argument Substitution ---

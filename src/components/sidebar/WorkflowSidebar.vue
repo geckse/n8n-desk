@@ -5,9 +5,11 @@ import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SessionList from './SessionList.vue'
 import { useWorkflowSessionsStore } from '@/stores/workflow-sessions'
+import { useWorkflowAgent } from '@/composables/useWorkflowAgent'
 
 const { t } = useI18n()
 const store = useWorkflowSessionsStore()
+const { sendMessage } = useWorkflowAgent()
 const searchQuery = ref('')
 const searchVisible = ref(false)
 
@@ -21,12 +23,24 @@ async function selectSession(sessionId: string) {
   await store.selectSession(sessionId)
 }
 
-function renameSession(_sessionId: string, _newTitle: string) {
-  // TODO: wire to workflow store when implemented
+async function renameSession(sessionId: string, newTitle: string) {
+  await store.renameSession(sessionId, newTitle)
 }
 
-function deleteSession(_sessionId: string) {
-  // TODO: wire to workflow store when implemented
+async function deleteSession(sessionId: string) {
+  await store.deleteSession(sessionId)
+}
+
+/**
+ * Re-run a past task (audit #50): new session with the same folders, then
+ * send the original first message to the agent.
+ */
+async function rerunSession(sessionId: string) {
+  const message = await store.firstUserMessage(sessionId)
+  if (!message) return
+  const source = store.sessions.find((s) => s.id === sessionId)
+  await store.createSession(undefined, source?.attachedFolders)
+  await sendMessage(message)
 }
 </script>
 
@@ -58,8 +72,10 @@ function deleteSession(_sessionId: string) {
       :sessions="store.sessions"
       :active-session-id="activeSessionId"
       :search-query="searchQuery"
+      show-rerun
       @select="selectSession"
       @rename="renameSession"
+      @rerun="rerunSession"
       @delete="deleteSession"
     />
   </div>

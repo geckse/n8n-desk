@@ -869,11 +869,10 @@ describe('E2E: Core Function Integration', () => {
 
       const result = buildSkillDescriptions(skills)
 
-      expect(result).toBe(
-        '## Available Skills\n' +
-        '- /deploy-prod: Deploy to production\n' +
-        '- /run-tests: Run the test suite',
-      )
+      expect(result).toContain('## Available Skills')
+      expect(result).toContain('invoke_skill')
+      expect(result).toContain('- deploy-prod: Deploy to production')
+      expect(result).toContain('- run-tests: Run the test suite')
     })
 
     it('returns null when no skills are available', () => {

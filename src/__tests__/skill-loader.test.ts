@@ -281,7 +281,8 @@ describe('skill-loader', () => {
       const skills = [makeSkill('deploy', 'Deploy to production')]
       const result = buildSkillDescriptions(skills)
 
-      expect(result).toBe('## Available Skills\n- /deploy: Deploy to production')
+      expect(result).toContain('## Available Skills')
+      expect(result).toContain('- deploy: Deploy to production')
     })
 
     it('builds description block for multiple skills', () => {
@@ -292,12 +293,9 @@ describe('skill-loader', () => {
       ]
       const result = buildSkillDescriptions(skills)
 
-      expect(result).toBe(
-        '## Available Skills\n' +
-        '- /deploy: Deploy to production\n' +
-        '- /test: Run test suite\n' +
-        '- /lint: Check code style',
-      )
+      expect(result).toContain('- deploy: Deploy to production')
+      expect(result).toContain('- test: Run test suite')
+      expect(result).toContain('- lint: Check code style')
     })
 
     it('only includes name and description, not full content', () => {
@@ -310,11 +308,13 @@ describe('skill-loader', () => {
       expect(result).toContain('Does secret things')
     })
 
-    it('prefixes skill names with /', () => {
+    it('teaches the invoke_skill mechanism (audit #58)', () => {
       const skills = [makeSkill('my-skill', 'My description')]
       const result = buildSkillDescriptions(skills)
 
-      expect(result).toContain('- /my-skill:')
+      expect(result).toContain('- my-skill:')
+      expect(result).toContain('invoke_skill')
+      expect(result).toContain('read_skill_file')
     })
   })
 })

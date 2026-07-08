@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { IonIcon, IonSpinner } from '@ionic/vue'
 import {
   checkmarkCircleOutline,
@@ -10,6 +11,7 @@ import {
   chevronForwardOutline,
 } from 'ionicons/icons'
 import type { AgentToolCall, WorkflowJson, WorkflowPreviewData } from '@/types/agent'
+import { toolDisplayName } from '@/utils/tool-display'
 import WorkflowEmbed from './WorkflowEmbed.vue'
 
 interface Props {
@@ -22,6 +24,7 @@ const emit = defineEmits<{
   preview: [data: WorkflowPreviewData]
 }>()
 
+const { t } = useI18n()
 const expanded = ref(false)
 
 const statusIcon = computed(() => {
@@ -29,6 +32,7 @@ const statusIcon = computed(() => {
     case 'completed': return checkmarkCircleOutline
     case 'failed': return closeCircleOutline
     case 'awaiting_approval': return timeOutline
+    case 'awaiting_input': return timeOutline
     default: return undefined
   }
 })
@@ -38,6 +42,7 @@ const statusColor = computed(() => {
     case 'completed': return 'var(--color--success, #10b981)'
     case 'failed': return 'var(--color--danger, #ef4444)'
     case 'awaiting_approval': return 'var(--color--warning, #f59e0b)'
+    case 'awaiting_input': return 'var(--color--warning, #f59e0b)'
     default: return 'var(--color--text--tint-1)'
   }
 })
@@ -82,9 +87,6 @@ function handlePreviewClick() {
   })
 }
 
-function formatToolName(name: string): string {
-  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
 </script>
 
 <template>
@@ -94,7 +96,7 @@ function formatToolName(name: string): string {
         <ion-spinner v-if="isRunning" name="crescent" :class="$style.spinner" />
         <ion-icon v-else-if="statusIcon" :icon="statusIcon" :style="{ color: statusColor }" :class="$style.statusIcon" />
         <ion-icon :icon="buildOutline" :class="$style.toolIcon" />
-        <span :class="$style.toolName">{{ formatToolName(toolCall.name) }}</span>
+        <span :class="$style.toolName">{{ toolDisplayName(toolCall.name) }}</span>
       </div>
       <ion-icon
         :icon="expanded ? chevronDownOutline : chevronForwardOutline"
@@ -104,12 +106,12 @@ function formatToolName(name: string): string {
 
     <div v-if="expanded" :class="$style.body">
       <div v-if="Object.keys(toolCall.args).length > 0" :class="$style.section">
-        <div :class="$style.sectionLabel">Arguments</div>
+        <div :class="$style.sectionLabel">{{ t('agentPanel.toolCard.arguments') }}</div>
         <pre :class="$style.code">{{ JSON.stringify(toolCall.args, null, 2) }}</pre>
       </div>
 
       <div v-if="toolCall.result !== undefined" :class="$style.section">
-        <div :class="$style.sectionLabel">Result</div>
+        <div :class="$style.sectionLabel">{{ t('agentPanel.toolCard.result') }}</div>
         <WorkflowEmbed
           v-if="resultWorkflow"
           :workflow="resultWorkflow"

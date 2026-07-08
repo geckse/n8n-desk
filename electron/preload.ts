@@ -6,10 +6,18 @@ contextBridge.exposeInMainWorld('n8nDesk', {
       ipcRenderer.invoke('agent:invoke', sessionId, message, options),
     stop: (sessionId: string) =>
       ipcRenderer.invoke('agent:stop', sessionId),
-    approve: (sessionId: string, decision: 'approve' | 'reject') =>
-      ipcRenderer.invoke('agent:approve', sessionId, decision),
+    stopAll: () =>
+      ipcRenderer.invoke('agent:stop-all'),
+    approve: (sessionId: string, approvalId: string, decision: 'approve' | 'approve_always' | 'reject') =>
+      ipcRenderer.invoke('agent:approve', sessionId, approvalId, decision),
+    answer: (sessionId: string, questionId: string, answers: Record<string, { selected: string[]; otherText?: string }>) =>
+      ipcRenderer.invoke('agent:answer', sessionId, questionId, answers),
     testConnection: () =>
       ipcRenderer.invoke('agent:test-connection'),
+    mcpStatus: (instanceId?: string) =>
+      ipcRenderer.invoke('agent:mcp-status', instanceId),
+    listMcpTools: (instanceId?: string) =>
+      ipcRenderer.invoke('agent:list-mcp-tools', instanceId),
     onEvent: (callback: (event: unknown) => void) => {
       const listener = (_ipcEvent: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on('agent:event', listener)

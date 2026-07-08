@@ -30,7 +30,8 @@
     "tasks": "Tasks",
     "workflows": "Workflows",
     "componentShowcase": "Component Showcase",
-    "addInstance": "Add instance"
+    "addInstance": "Add instance",
+    "rerun": "Re-run"
   },
   "settings": {
     "title": "Settings",
@@ -45,9 +46,26 @@
       "instances": "Instances",
       "dangerZone": "Danger Zone",
       "aiAgent": "AI / Agent",
+      "toolApprovals": "Tool Approvals",
       "skills": "Skills",
       "connectors": "Connectors",
       "plugins": "Plugins"
+    },
+    "toolApprovals": {
+      "description": "Tools marked \"Always allow\" run without an approval prompt in every session on this instance. Session-only grants (\"Always allow this session\") are not listed here.",
+      "loading": "Discovering tools...",
+      "n8nServerTitle": "n8n tools",
+      "customServersTitle": "Connector tools",
+      "alwaysAllow": "Always allow",
+      "requiresApprovalBadge": "Requires approval",
+      "destructiveBadge": "Destructive",
+      "neverPrompts": "Never prompts",
+      "unreachable": "Could not reach this server: {error}",
+      "unavailableTitle": "Unavailable tools",
+      "unavailableDescription": "These tools have an \"always allow\" preset but are not offered by any reachable server right now.",
+      "remove": "Remove",
+      "empty": "No tools discovered. Check your instance connection.",
+      "loadError": "Could not load the tool catalog: {error}"
     },
     "ai": {
       "description": "Configure the AI backend for Cowork and Workflow modes.",
@@ -73,6 +91,28 @@
     "instanceColor": "Color",
     "disconnectInstance": "Disconnect Instance",
     "disconnectDescription": "This will revoke your access tokens and remove this instance from n8n-desk. You can reconnect at any time.",
+    "connection": {
+      "title": "Connection",
+      "description": "How n8n-desk is connected to this instance.",
+      "accountLabel": "n8n Account",
+      "accountHint": "Used for Chat — your n8n user session.",
+      "mcpLabel": "MCP Server",
+      "mcpHint": "Used for building workflows and executing them via MCP (Cowork & Workflow mode).",
+      "signIn": "Sign in",
+      "reconnect": "Reconnect",
+      "statusChecking": "Checking connection…",
+      "statusReconnecting": "Reconnecting…",
+      "statusConnected": "Connected",
+      "statusConnectedTools": "Connected — {count} tools available",
+      "statusUnauthorized": "Authorization expired — reconnect to sign in again",
+      "statusUnreachable": "Can't reach the MCP server",
+      "statusNotConfigured": "Not connected",
+      "statusSignedIn": "Signed in",
+      "statusSignedInAs": "Signed in as {email}",
+      "statusNotSignedIn": "Not signed in",
+      "statusSessionExpired": "Session expired — sign in again",
+      "statusInstanceUnreachable": "Can't reach the instance"
+    },
     "instances": {
       "title": "Instances",
       "description": "Manage your connected n8n instances.",
@@ -168,7 +208,11 @@
   },
   "reLogin": {
     "title": "Session expired",
-    "description": "Your session with {instance} has expired. Sign in again to continue.",
+    "description": "Your session with this instance has expired. Sign in again to continue.",
+    "signInTitle": "Sign in",
+    "signInDescription": "Sign in with your n8n account to use Chat mode on this instance.",
+    "switchInstance": "Switch",
+    "switchHint": "Or continue with another instance:",
     "signInButton": "Sign in",
     "signingIn": "Signing in...",
     "error": "Sign-in failed. Check your credentials and try again.",
@@ -179,7 +223,14 @@
       "placeholder": "Message {agent}...",
       "placeholderDefault": "Send a message...",
       "send": "Send",
-      "stop": "Stop generating"
+      "stop": "Stop generating",
+      "attachFolder": "Attach a project folder",
+      "attachFiles": "Attach files",
+      "dismissError": "Dismiss error",
+      "removeFile": "Remove {name}",
+      "removeFolder": "Remove folder {name}",
+      "typeMessage": "Type a message…",
+      "reconnect": "Reconnect to continue…"
     },
     "emptyState": {
       "title": "Start a conversation",
@@ -200,7 +251,9 @@
       "errorGeneric": "Something went wrong. Please try again.",
       "errorNetwork": "Network error. Check your connection and try again.",
       "errorTimeout": "Request timed out. Please try again.",
-      "errorRateLimit": "Too many requests. Please wait a moment."
+      "errorRateLimit": "Too many requests. Please wait a moment.",
+      "edit": "Edit message",
+      "regenerate": "Regenerate response"
     },
     "agents": {
       "title": "Agents",
@@ -211,7 +264,11 @@
       "selectAgent": "Select an agent",
       "agentInfo": "Agent Info",
       "createdBy": "Created by {name}",
-      "model": "Model"
+      "model": "Model",
+      "searchPlaceholder": "Search agents and models...",
+      "noMatches": "No agents or models match \"{query}\"",
+      "noneAvailable": "No agents or models available. Check your instance configuration.",
+      "unavailable": "Unavailable"
     },
     "artifacts": {
       "title": "Artifacts",
@@ -291,6 +348,24 @@
       "new": "New task",
       "noSessions": "No tasks yet",
       "untitled": "Untitled task"
+    },
+    "examples": {
+      "csvInvoices": {
+        "label": "Process CSV invoices",
+        "prompt": "Read all CSV files in the current folder, extract invoice totals, and create a summary spreadsheet"
+      },
+      "syncServices": {
+        "label": "Sync data between services",
+        "prompt": "Fetch new leads from the CRM and sync them to our mailing list using an existing workflow"
+      },
+      "weeklyReport": {
+        "label": "Generate a weekly report",
+        "prompt": "Collect metrics from the last 7 days and compile a formatted status report"
+      },
+      "cleanDuplicates": {
+        "label": "Clean up duplicates",
+        "prompt": "Scan the data folder for duplicate entries across JSON files and consolidate them"
+      }
     }
   },
   "workflow": {
@@ -329,6 +404,35 @@
       "title": "Workflow Mode",
       "description": "Describe what you want to automate and the AI agent will build n8n workflows for you.",
       "noConfig": "Configure an AI backend in Settings to get started."
+    },
+    "sessions": {
+      "title": "Workflows",
+      "new": "New workflow session",
+      "noSessions": "No workflows yet",
+      "untitled": "Untitled workflow"
+    },
+    "examples": {
+      "emailDigest": {
+        "label": "Email digest workflow",
+        "prompt": "Create a workflow that checks Gmail every morning, summarizes new emails with AI, and sends a digest to Slack"
+      },
+      "leadEnrichment": {
+        "label": "Lead enrichment pipeline",
+        "prompt": "Build a workflow that triggers on new CRM contacts, enriches them with company data, and updates the record"
+      },
+      "scheduledBackup": {
+        "label": "Scheduled data backup",
+        "prompt": "Create a workflow that runs daily to export data from Postgres, compress it, and upload to S3"
+      },
+      "webhookNotification": {
+        "label": "Webhook to notification",
+        "prompt": "Build a workflow with a webhook trigger that receives form submissions and sends a formatted notification to Teams"
+      }
+    },
+    "input": {
+      "placeholder": "Describe a workflow to create or modify...",
+      "send": "Send",
+      "stop": "Stop agent"
     }
   },
   "errors": {
@@ -563,5 +667,63 @@
     "coworkComingSoon": "Cowork mode — coming soon",
     "workflowComingSoon": "Workflow mode — coming soon",
     "onboardingComingSoon": "Onboarding — coming soon"
+  },
+  "agentPanel": {
+    "thinking": "Thinking",
+    "plan": "Plan",
+    "stopAgent": "Stop agent",
+    "send": "Send message",
+    "configHint": "Configure AI in Settings > AI/Agent",
+    "plusMenu": "Skills, Connectors & Plugins",
+    "attachFolder": "Attach a project folder",
+    "attachFiles": "Attach files",
+    "removeFile": "Remove {name}",
+    "detachFolder": "Detach {name}",
+    "showInFinder": "Show in Finder",
+    "folderModeRo": "Read-only",
+    "folderModeRw": "Read & write",
+    "folderModeRoHint": "Read-only — click to allow writes",
+    "folderModeRwHint": "Read & write — click to make read-only",
+    "mcpBanner": {
+      "unreachable": "Can't reach the MCP server on {instance} — n8n tools are unavailable.",
+      "unauthorized": "Authorization for {instance} expired — n8n tools are unavailable.",
+      "retry": "Retry",
+      "reconnect": "Reconnect",
+      "openSettings": "Settings",
+      "reconnectFailed": "Reconnect failed"
+    },
+    "toolCard": {
+      "arguments": "Arguments",
+      "result": "Result"
+    },
+    "approval": {
+      "title": "Approval Required",
+      "operation": "Operation:",
+      "arguments": "Arguments",
+      "approve": "Approve",
+      "approveAlways": "Always allow this session",
+      "reject": "Reject & stop",
+      "generic": "The agent wants to run {tool}.",
+      "prompts": {
+        "execute_workflow": "The agent wants to execute workflow \"{name}\".",
+        "create_workflow_from_code": "The agent wants to create a new workflow.",
+        "update_workflow": "The agent wants to update workflow \"{name}\".",
+        "publish_workflow": "The agent wants to activate workflow \"{name}\".",
+        "unpublish_workflow": "The agent wants to deactivate workflow \"{name}\".",
+        "archive_workflow": "The agent wants to archive workflow \"{name}\"."
+      }
+    },
+    "question": {
+      "title": "The agent has a question",
+      "stepCounter": "{current} of {total}",
+      "selectOne": "Select one",
+      "selectAny": "Select all that apply",
+      "otherLabel": "Other",
+      "otherPlaceholder": "Type your own answer…",
+      "back": "Back",
+      "next": "Next",
+      "submit": "Send answers",
+      "waitingInput": "Waiting for your answer"
+    }
   }
 }

@@ -3,7 +3,7 @@ import { MakerZIP } from '@electron-forge/maker-zip'
 import { MakerDMG } from '@electron-forge/maker-dmg'
 import { MakerSquirrel } from '@electron-forge/maker-squirrel'
 import { MakerDeb } from '@electron-forge/maker-deb'
-import { MakerAppImage } from '@electron-forge/maker-appimage'
+import { MakerAppImage } from '@reforged/maker-appimage'
 
 const isMac = process.platform === 'darwin'
 const isWin = process.platform === 'win32'

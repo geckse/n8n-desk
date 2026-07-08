@@ -138,18 +138,18 @@ describe('workflow-sessions store', () => {
       store = useWorkflowSessionsStore()
       await store.hydrate('inst_1')
       await store.createSession('Test')
-      store.isAgentRunning = true
+      store.markRunning(store.activeSessionId!)
     })
 
     it('text_chunk accumulates into assistant message', () => {
       store.handleAgentEvent({
         type: 'text_chunk',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { text: 'Hello' },
       })
       store.handleAgentEvent({
         type: 'text_chunk',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { text: ' world' },
       })
 
@@ -161,7 +161,7 @@ describe('workflow-sessions store', () => {
     it('tool_call_start adds to toolCalls and messages', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_1', name: 'execute_workflow', args: { workflowId: '42' } },
       })
 
@@ -177,12 +177,12 @@ describe('workflow-sessions store', () => {
     it('tool_call_result updates tool call status', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_2', name: 'search_workflows', args: {} },
       })
       store.handleAgentEvent({
         type: 'tool_call_result',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_2', name: 'search_workflows', result: { workflows: [] }, success: true },
       })
 
@@ -193,12 +193,12 @@ describe('workflow-sessions store', () => {
     it('tool_call_result marks failed on success=false', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_3', name: 'create_workflow', args: {} },
       })
       store.handleAgentEvent({
         type: 'tool_call_result',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_3', name: 'create_workflow', result: null, success: false, error: 'fail' },
       })
 
@@ -208,12 +208,12 @@ describe('workflow-sessions store', () => {
     it('approval_required sets pendingApproval', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_4', name: 'publish_workflow', args: {} },
       })
       store.handleAgentEvent({
         type: 'approval_required',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_4', toolName: 'publish_workflow', args: {}, description: 'Publish?' },
       })
 
@@ -225,17 +225,17 @@ describe('workflow-sessions store', () => {
     it('approval_resolved clears pending and updates tool call', () => {
       store.handleAgentEvent({
         type: 'tool_call_start',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_5', name: 'publish_workflow', args: {} },
       })
       store.handleAgentEvent({
         type: 'approval_required',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_5', toolName: 'publish_workflow', args: {}, description: 'Publish?' },
       })
       store.handleAgentEvent({
         type: 'approval_resolved',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { id: 'tc_5', decision: 'approve' },
       })
 
@@ -243,27 +243,220 @@ describe('workflow-sessions store', () => {
       expect(store.toolCalls[0].status).toBe('running')
     })
 
-    it('error event adds system message and stops agent', () => {
+    it('question_asked sets pendingQuestion and marks the tool call awaiting_input', () => {
+      store.handleAgentEvent({
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_q1', name: 'ask_user_question', args: {} },
+      })
+      store.handleAgentEvent({
+        type: 'question_asked',
+        sessionId: store.activeSessionId!,
+        data: {
+          id: 'tc_q1',
+          questions: [{ id: 'q1', question: 'Which format?', options: [{ label: 'CSV' }] }],
+        },
+      })
+
+      expect(store.pendingQuestion).toBeTruthy()
+      expect(store.pendingQuestion!.questions[0].question).toBe('Which format?')
+      expect(store.toolCalls[0].status).toBe('awaiting_input')
+    })
+
+    it('question_answered clears pendingQuestion, resumes the tool call, and persists the answers', () => {
+      store.handleAgentEvent({
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_q2', name: 'ask_user_question', args: {} },
+      })
+      store.handleAgentEvent({
+        type: 'question_asked',
+        sessionId: store.activeSessionId!,
+        data: {
+          id: 'tc_q2',
+          questions: [{ id: 'q1', question: 'Which format?', options: [{ label: 'CSV' }] }],
+        },
+      })
+      store.handleAgentEvent({
+        type: 'question_answered',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_q2', answers: { q1: { selected: ['CSV'], otherText: 'keep both' } } },
+      })
+
+      expect(store.pendingQuestion).toBeNull()
+      expect(store.toolCalls[0].status).toBe('running')
+
+      const toolMsg = store.messages.find(
+        (m) => m.role === 'tool' && (m.meta as Record<string, unknown>)?.toolCallId === 'tc_q2'
+      )
+      expect(toolMsg).toBeTruthy()
+      expect((toolMsg!.meta as Record<string, unknown>).questionAnswers).toEqual({
+        q1: { selected: ['CSV'], otherText: 'keep both' },
+      })
+      // The answered message was persisted to JSONL
+      expect(localStorageService.appendJsonl).toHaveBeenCalledWith(
+        expect.stringContaining(store.activeSessionId!),
+        expect.objectContaining({ meta: expect.objectContaining({ toolCallId: 'tc_q2' }) })
+      )
+    })
+
+    it('done clears a pendingQuestion', () => {
+      store.handleAgentEvent({
+        type: 'question_asked',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_q3', questions: [{ id: 'q1', question: 'X?', options: [{ label: 'A' }] }] },
+      })
+      expect(store.pendingQuestion).toBeTruthy()
+
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'cancelled' },
+      })
+
+      expect(store.pendingQuestion).toBeNull()
+      expect(store.isAgentRunning).toBe(false)
+    })
+
+    it('error event adds system message but keeps the agent running until done', () => {
+      // Runners emit non-terminal errors (e.g. MCP discovery failure — the
+      // run continues with local tools). Only `done` clears the running flag;
+      // clearing it on `error` hid the spinner and stop button while the
+      // agent kept streaming results.
       store.handleAgentEvent({
         type: 'error',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { message: 'Something broke', code: 'ERR_500' },
       })
 
-      expect(store.isAgentRunning).toBe(false)
+      expect(store.isAgentRunning).toBe(true)
       const sysMsg = store.messages.find((m) => m.role === 'system')
       expect(sysMsg).toBeTruthy()
       expect(sysMsg!.content).toBe('Something broke')
+
+      // Terminal errors are always followed by done — THAT clears running.
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'error' },
+      })
+      expect(store.isAgentRunning).toBe(false)
+    })
+
+    it('activity events re-mark a desynced session as running (self-healing)', () => {
+      store.markStopped(store.activeSessionId!)
+      expect(store.isAgentRunning).toBe(false)
+
+      store.handleAgentEvent({
+        type: 'text_chunk',
+        sessionId: store.activeSessionId!,
+        data: { text: 'still working…' },
+      })
+
+      expect(store.isAgentRunning).toBe(true)
+    })
+
+    it('workflow_preview does NOT re-mark a finished session as running', () => {
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'completed' },
+      })
+      // Detached preview fetches can resolve after the run completed.
+      store.handleAgentEvent({
+        type: 'workflow_preview',
+        sessionId: store.activeSessionId!,
+        data: { workflowId: 'wf_1', name: 'WF', workflow: { nodes: [], connections: {} } },
+      })
+
+      expect(store.isAgentRunning).toBe(false)
     })
 
     it('done event stops agent running', () => {
       store.handleAgentEvent({
         type: 'done',
-        sessionId: 'test',
+        sessionId: store.activeSessionId!,
         data: { reason: 'completed' },
       })
 
       expect(store.isAgentRunning).toBe(false)
+    })
+
+    it('error followed by done fails in-flight tool calls with the error as reason', () => {
+      store.handleAgentEvent({
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_stuck', name: 'update_workflow', args: {} },
+      })
+      store.handleAgentEvent({
+        type: 'error',
+        sessionId: store.activeSessionId!,
+        data: { message: 'MCP error -32602: Invalid arguments', code: 'AGENT_ERROR' },
+      })
+      // A non-terminal error alone leaves the card alone — results may still come.
+      expect(store.toolCalls[0].status).toBe('running')
+
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'error' },
+      })
+
+      expect(store.toolCalls[0].status).toBe('failed')
+      const toolMsg = store.messages.find((m) => m.role === 'tool')
+      expect((toolMsg!.meta as Record<string, unknown>).status).toBe('failed')
+      expect((toolMsg!.meta as Record<string, unknown>).error).toContain('-32602')
+    })
+
+    it('done event fails tool calls that never got a result, leaves completed ones alone', () => {
+      store.handleAgentEvent({
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_done_ok', name: 'search_workflows', args: {} },
+      })
+      store.handleAgentEvent({
+        type: 'tool_call_result',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_done_ok', name: 'search_workflows', result: {}, success: true },
+      })
+      store.handleAgentEvent({
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_done_stuck', name: 'execute_workflow', args: {} },
+      })
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'error' },
+      })
+
+      expect(store.toolCalls.find((t) => t.id === 'tc_done_ok')!.status).toBe('completed')
+      expect(store.toolCalls.find((t) => t.id === 'tc_done_stuck')!.status).toBe('failed')
+    })
+
+    it('error + done fails a tool call stuck awaiting approval', () => {
+      store.handleAgentEvent({
+        type: 'tool_call_start',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_appr', name: 'publish_workflow', args: {} },
+      })
+      store.handleAgentEvent({
+        type: 'approval_required',
+        sessionId: store.activeSessionId!,
+        data: { id: 'tc_appr', toolName: 'publish_workflow', args: {}, description: 'Publish?' },
+      })
+      store.handleAgentEvent({
+        type: 'error',
+        sessionId: store.activeSessionId!,
+        data: { message: 'runner died', code: 'AGENT_ERROR' },
+      })
+      store.handleAgentEvent({
+        type: 'done',
+        sessionId: store.activeSessionId!,
+        data: { reason: 'error' },
+      })
+
+      expect(store.toolCalls[0].status).toBe('failed')
     })
   })
 
@@ -272,7 +465,7 @@ describe('workflow-sessions store', () => {
       const store = useWorkflowSessionsStore()
       await store.hydrate('inst_1')
       await store.createSession('Test')
-      store.isAgentRunning = true
+      store.markRunning(store.activeSessionId!)
 
       store.reset()
 

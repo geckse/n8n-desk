@@ -1,3 +1,54 @@
+// --- MCP Health ---
+
+/** Result of the agent:mcp-status IPC health check (mirrors electron/ipc/agent.ts). */
+export interface McpStatusResult {
+  status: 'connected' | 'unauthorized' | 'unreachable' | 'not-configured'
+  toolCount?: number
+  isCustom?: boolean
+  instanceId?: string
+  error?: string
+}
+
+// --- MCP Tool Catalog (Settings > Tool approvals) ---
+
+/** One tool in the catalog (mirrors electron/ipc/agent.ts agent:list-mcp-tools). */
+export interface McpToolCatalogEntry {
+  name: string
+  /**
+   * Canonical allowlist key persisted in tool-approvals.json: the bare name
+   * for n8n server tools, `{server}__{tool}` for custom-server tools.
+   */
+  key: string
+  description?: string
+  /** True when this tool would prompt for approval without a preset. */
+  gated: boolean
+  /** True for the static destructive n8n tool set — warn in the UI. */
+  destructive: boolean
+}
+
+export interface McpToolCatalogServer {
+  serverName: string
+  requireApproval: boolean
+  reachable: boolean
+  error?: string
+  tools: McpToolCatalogEntry[]
+}
+
+export interface McpToolCatalog {
+  instanceId: string | null
+  n8n: { reachable: boolean; error?: string; tools: McpToolCatalogEntry[] }
+  customServers: McpToolCatalogServer[]
+}
+
+/**
+ * Persistent per-instance always-allow presets, stored at
+ * `instances/{id}/tool-approvals.json` (mirrors electron/agent/approval-presets.ts).
+ */
+export interface ToolApprovalPresets {
+  version: 1
+  alwaysAllow: string[]
+}
+
 // --- MCP Tool Names ---
 
 export type McpToolName =

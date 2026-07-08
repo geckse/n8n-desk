@@ -4,7 +4,6 @@ import { setActivePinia, createPinia } from 'pinia'
 import { defineComponent, nextTick } from 'vue'
 import { useCoworkAgent } from '@/composables/useCoworkAgent'
 import { useCoworkSessionsStore } from '@/stores/cowork-sessions'
-import type { AgentEvent } from '@/types/agent'
 
 // Mock local-storage service (required by the cowork-sessions store)
 vi.mock('@/services/local-storage', () => {
@@ -41,17 +40,13 @@ vi.mock('@/services/local-storage', () => {
 import { localStorageService } from '@/services/local-storage'
 const mockStore = (localStorageService as unknown as { _store: Record<string, string>; _reset: () => void })
 
-// Track event listener registrations
-let capturedEventCallback: ((event: AgentEvent) => void) | null = null
-const mockRemoveListener = vi.fn()
+// The composable no longer registers an event listener (a single global
+// listener in main.ts routes events to the stores) — onEvent is a plain stub.
 const mockInvoke = vi.fn().mockResolvedValue({ success: true })
 const mockStop = vi.fn().mockResolvedValue({ success: true })
 const mockApprove = vi.fn().mockResolvedValue({ success: true })
 const mockTestConnection = vi.fn().mockResolvedValue({ success: true })
-const mockOnEvent = vi.fn((callback: (event: AgentEvent) => void) => {
-  capturedEventCallback = callback
-  return mockRemoveListener
-})
+const mockOnEvent = vi.fn(() => vi.fn())
 
 // Helper: create a wrapper component that calls useCoworkAgent inside setup
 function createWrapperComponent() {
@@ -73,7 +68,6 @@ describe('useCoworkAgent', () => {
     setActivePinia(createPinia())
     mockStore._reset()
     vi.clearAllMocks()
-    capturedEventCallback = null
 
     // Set up the n8nDesk bridge mock
     window.n8nDesk = {
@@ -139,19 +133,33 @@ describe('useCoworkAgent', () => {
     }
   })
 
-  it('registers event listener on mount', () => {
+  it('sendMessage marks the session running', async () => {
+    const store = useCoworkSessionsStore()
+    await store.hydrate('inst_1')
+
     const wrapper = mount(createWrapperComponent())
-    expect(mockOnEvent).toHaveBeenCalledTimes(1)
-    expect(mockOnEvent).toHaveBeenCalledWith(expect.any(Function))
+    const { agent } = wrapper.vm
+
+    await agent.sendMessage('Go')
+
+    expect(store.isAgentRunning).toBe(true)
     wrapper.unmount()
   })
 
-  it('removes event listener on unmount', () => {
-    const wrapper = mount(createWrapperComponent())
-    expect(mockRemoveListener).not.toHaveBeenCalled()
+  it('sendMessage unmarks running and appends an error message when invoke fails', async () => {
+    mockInvoke.mockResolvedValueOnce({ success: false, error: 'no config' })
+    const store = useCoworkSessionsStore()
+    await store.hydrate('inst_1')
 
+    const wrapper = mount(createWrapperComponent())
+    const { agent } = wrapper.vm
+
+    await agent.sendMessage('Go')
+
+    expect(store.isAgentRunning).toBe(false)
+    const sysMsg = store.messages.find((m) => m.role === 'system')
+    expect(sysMsg?.content).toBe('no config')
     wrapper.unmount()
-    expect(mockRemoveListener).toHaveBeenCalledTimes(1)
   })
 
   it('sendMessage calls agent.invoke with mode: cowork', async () => {
@@ -211,13 +219,9 @@ describe('useCoworkAgent', () => {
     const store = useCoworkSessionsStore()
     await store.hydrate('inst_1')
     await store.createSession('Test')
-    store.isAgentRunning = true
+    store.markRunning(store.activeSessionId!)
 
-    const wrapper = mount(createWrapperComponent())
-
-    // Simulate an agent event via the captured callback
-    expect(capturedEventCallback).not.toBeNull()
-    capturedEventCallback!({
+    store.handleAgentEvent({
       type: 'text_chunk',
       sessionId: store.activeSessionId!,
       data: { text: 'Agent response' },
@@ -228,20 +232,16 @@ describe('useCoworkAgent', () => {
     const assistantMsgs = store.messages.filter((m) => m.role === 'assistant')
     expect(assistantMsgs).toHaveLength(1)
     expect(assistantMsgs[0].content).toBe('Agent response')
-
-    wrapper.unmount()
   })
 
-  it('ignores events for a different session', async () => {
+  it('ignores events for sessions this store does not own', async () => {
     const store = useCoworkSessionsStore()
     await store.hydrate('inst_1')
     await store.createSession('Test')
-    store.isAgentRunning = true
+    store.markRunning(store.activeSessionId!)
 
-    const wrapper = mount(createWrapperComponent())
-
-    // Send event with a different sessionId
-    capturedEventCallback!({
+    // e.g. a workflow-mode session id arriving via the global listener
+    store.handleAgentEvent({
       type: 'text_chunk',
       sessionId: 'session_other',
       data: { text: 'Should be ignored' },
@@ -251,8 +251,6 @@ describe('useCoworkAgent', () => {
 
     const assistantMsgs = store.messages.filter((m) => m.role === 'assistant')
     expect(assistantMsgs).toHaveLength(0)
-
-    wrapper.unmount()
   })
 
   it('stopAgent delegates to IPC bridge', async () => {
@@ -271,7 +269,48 @@ describe('useCoworkAgent', () => {
     wrapper.unmount()
   })
 
-  it('approveAction delegates to IPC bridge', async () => {
+  it('approveAction forwards the real approval id to the IPC bridge', async () => {
+    const store = useCoworkSessionsStore()
+    await store.hydrate('inst_1')
+    await store.createSession('Test')
+    store.handleAgentEvent({
+      type: 'approval_required',
+      sessionId: store.activeSessionId!,
+      data: { id: 'approval-123', toolName: 'execute_workflow', args: {}, description: 'Approve execute_workflow?' },
+    })
+
+    const wrapper = mount(createWrapperComponent())
+    const { agent } = wrapper.vm
+
+    await agent.approveAction('approve')
+
+    expect(mockApprove).toHaveBeenCalledTimes(1)
+    expect(mockApprove).toHaveBeenCalledWith(store.activeSessionId, 'approval-123', 'approve')
+
+    wrapper.unmount()
+  })
+
+  it('approveAction with reject delegates correctly', async () => {
+    const store = useCoworkSessionsStore()
+    await store.hydrate('inst_1')
+    await store.createSession('Test')
+    store.handleAgentEvent({
+      type: 'approval_required',
+      sessionId: store.activeSessionId!,
+      data: { id: 'approval-456', toolName: 'execute_workflow', args: {}, description: 'Approve execute_workflow?' },
+    })
+
+    const wrapper = mount(createWrapperComponent())
+    const { agent } = wrapper.vm
+
+    await agent.approveAction('reject')
+
+    expect(mockApprove).toHaveBeenCalledWith(store.activeSessionId, 'approval-456', 'reject')
+
+    wrapper.unmount()
+  })
+
+  it('approveAction is a no-op when no approval is pending', async () => {
     const store = useCoworkSessionsStore()
     await store.hydrate('inst_1')
     await store.createSession('Test')
@@ -281,23 +320,7 @@ describe('useCoworkAgent', () => {
 
     await agent.approveAction('approve')
 
-    expect(mockApprove).toHaveBeenCalledTimes(1)
-    expect(mockApprove).toHaveBeenCalledWith(store.activeSessionId, 'approve')
-
-    wrapper.unmount()
-  })
-
-  it('approveAction with reject delegates correctly', async () => {
-    const store = useCoworkSessionsStore()
-    await store.hydrate('inst_1')
-    await store.createSession('Test')
-
-    const wrapper = mount(createWrapperComponent())
-    const { agent } = wrapper.vm
-
-    await agent.approveAction('reject')
-
-    expect(mockApprove).toHaveBeenCalledWith(store.activeSessionId, 'reject')
+    expect(mockApprove).not.toHaveBeenCalled()
 
     wrapper.unmount()
   })
